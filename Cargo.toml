@@ -1,0 +1,27 @@
+[package]
+name = "cert-helper"
+version = "0.1.0"
+edition = "2024"
+authors = ["Christer Johansson"]
+build = false
+autobins = false
+autoexamples = false
+autobenches = false
+description = "Helper library for creating certificates using openssl"
+readme = "README.md"
+keywords = ["x509", "Certificates"]
+categories = ["cryptography"]
+license = "MIT"
+
+[lib]
+name = "cert_helper"
+path = "src/lib.rs"
+
+[[example]]
+name = "create_certificates_and_write_to_file"
+path = "examples/create_certificates_and_write_to_file.rs"
+
+[dependencies]
+chrono = "0.4.41"
+openssl = { version = "0.10.73" }
+x509-parser = "0.17.0"
