@@ -40,7 +40,6 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
         .is_ca(true)
         .key_type(KeyType::P521)
         .signature_alg(HashAlg::SHA512)
-        .alternative_names(vec!["my-alt-name"])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
 
     let root_cert = ca.build_and_self_sign()?;
@@ -55,7 +54,7 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
     // Make sure alt names was added
     let alt_names = &x509.subject_alt_names().unwrap();
     let dns_value = alt_names.get(0).and_then(|name| name.dnsname());
-    assert_eq!(dns_value, Some("my-alt-name"));
+    assert_eq!(dns_value, Some("My Test Ca"));
 
     let subject = &x509.subject_name();
     let cn = subject.entries_by_nid(Nid::COMMONNAME).next().unwrap();

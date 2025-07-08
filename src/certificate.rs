@@ -22,9 +22,11 @@ use std::path::Path;
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
 
-macro_rules! to_string_vec {
+macro_rules! vec_str_to_hs {
     ($vec:expr) => {
-        $vec.iter().map(|s| s.to_string()).collect::<Vec<String>>()
+        $vec.iter()
+            .map(|s| s.to_string())
+            .collect::<HashSet<String>>()
     };
 }
 /// Defines what type of key that can be used with the certificate
@@ -112,7 +114,7 @@ impl Certificate {
 pub struct CertBuilder {
     common_name: String,
     signer: Option<String>, //place holder for maybe future use??
-    alternative_names: Option<Vec<String>>,
+    alternative_names: HashSet<String>,
     country_name: String,
     state_province: String,
     organization: String,
@@ -152,18 +154,20 @@ impl CertBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Sets the common name, CN
+    /// Sets the common name, CN. This value will also be added to alternaitve_names
     pub fn common_name(mut self, common_name: &str) -> Self {
         self.common_name = common_name.into();
+        self.alternative_names.insert(String::from(common_name));
         self
     }
     pub fn signer(mut self, signer: &str) -> Self {
         self.signer = Some(signer.into());
         self
     }
-    /// A list of altrnative names(SAN)
+    /// A list of altrnative names(SAN) the Common Name(CN) is always included
     pub fn alternative_names(mut self, alternative_names: Vec<&str>) -> Self {
-        self.alternative_names = Some(to_string_vec!(alternative_names));
+        self.alternative_names
+            .extend(vec_str_to_hs!(alternative_names));
         self
     }
     /// Country, a valid two char value
@@ -305,18 +309,16 @@ impl CertBuilder {
             builder.append_extension(tracked_extended_key_usage.into_inner().build()?)?;
         }
 
-        if let Some(alt_names) = &self.alternative_names {
-            let mut san = SubjectAlternativeName::new();
-            for s in alt_names {
-                san.dns(s);
-            }
-            if let Some(signer_cert) = signer {
-                builder.append_extension(
-                    san.build(&builder.x509v3_context(Some(&signer_cert.x509), None))?,
-                )?;
-            } else {
-                builder.append_extension(san.build(&builder.x509v3_context(None, None))?)?;
-            }
+        let mut san = SubjectAlternativeName::new();
+        for s in &self.alternative_names {
+            san.dns(s);
+        }
+        if let Some(signer_cert) = signer {
+            builder.append_extension(
+                san.build(&builder.x509v3_context(Some(&signer_cert.x509), None))?,
+            )?;
+        } else {
+            builder.append_extension(san.build(&builder.x509v3_context(None, None))?)?;
         }
         Ok((builder, pkey))
     }
