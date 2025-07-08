@@ -13,6 +13,11 @@ keywords = ["x509", "Certificates"]
 categories = ["cryptography"]
 license = "MIT"
 
+#documentation = "https://docs.rs/your_crate_name"
+homepage = "https://github.com/chrjoh/cert-helper"
+repository = "https://github.com/chrjoh/cert-helper"
+
+
 [lib]
 name = "cert_helper"
 path = "src/lib.rs"
@@ -25,3 +30,6 @@ path = "examples/create_certificates_and_write_to_file.rs"
 chrono = "0.4.41"
 openssl = { version = "0.10.73" }
 x509-parser = "0.17.0"
+
+[dev-dependencies]
+tempfile = "3"

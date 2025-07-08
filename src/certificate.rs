@@ -590,3 +590,76 @@ fn can_sign_cert(cert: &X509) -> Result<bool, Box<dyn std::error::Error>> {
     }
     Ok(is_ca && can_sign)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::path::Path;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn save_certificate() {
+        let ca = CertBuilder::new().common_name("My Test Ca").is_ca(true);
+        match ca.build_and_self_sign() {
+            Ok(cert) => {
+                let output_file = NamedTempFile::new().unwrap();
+                let full_path = output_file.path();
+                let parent_dir: &Path = full_path.parent().unwrap();
+                let file_name: &str = full_path.file_name().unwrap().to_str().unwrap();
+                cert.save(parent_dir, file_name)
+                    .expect("Failed to save certificate and key");
+                let written_file_path = parent_dir.join(file_name);
+                assert!(written_file_path.exists(), "File was not created");
+            }
+            Err(_) => panic!("Failed to creat certificate"),
+        }
+    }
+
+    #[test]
+    fn rea_certificate_and_key_from_file() {
+        // PEM-formatted certificate and private key
+        let cert_pem = b"-----BEGIN CERTIFICATE-----
+MIICiDCCAemgAwIBAgIUO3+y1WZPRRNs8dmZZTUHMj6TdiowCgYIKoZIzj0EAwQw
+WzETMBEGA1UEAwwKTXkgVGVzdCBDYTELMAkGA1UEBhMCU0UxEjAQBgNVBAgMCVN0
+b2NraG9sbTESMBAGA1UEBwwJU3RvY2tob2xtMQ8wDQYDVQQKDAZteSBvcmcwHhcN
+MjUwNzA4MTExMzI2WhcNMjYwNzA4MTExMzI2WjBbMRMwEQYDVQQDDApNeSBUZXN0
+IENhMQswCQYDVQQGEwJTRTESMBAGA1UECAwJU3RvY2tob2xtMRIwEAYDVQQHDAlT
+dG9ja2hvbG0xDzANBgNVBAoMBm15IG9yZzCBmzAQBgcqhkjOPQIBBgUrgQQAIwOB
+hgAEADZXcQK2ihgVTJeGx5FKm1x+R+ivygIvMnkv03faq1LpLU3doKX38DEO/cSW
+Ev5u+kcjspXeeDPhqJFC8rRAz4awAMk+D0mXEms7xpFPh0HmI6NNcJc5eJ/8ZsEJ
+GH1a34y0Yn6259gqlwAh2Eh9Nx1579BAanRr8lr+n1tZ09T/9AQho0gwRjAMBgNV
+HRMEBTADAQH/MAsGA1UdDwQEAwIBBjApBgNVHREEIjAgggZjYS5jb22CCnd3dy5j
+YS5jb22CCk15IFRlc3QgQ2EwCgYIKoZIzj0EAwQDgYwAMIGIAkIB8NVUgRIuNXmJ
+cLCQ74Ub7Dqo71S0+iCrZF1YyJA8/q65aqMCT54k5Yx7HRBUUVHbCEpDXRqGPsIH
+frfe5OmS3qICQgDBn07o0CcyfoSEd+Xoj2+/RBuU0vo9lUP7TKj7tssBxzEQFoxX
+eE1qT98UIe78FZ+zqjwZTN9MCSsatuim6pXvOA==
+-----END CERTIFICATE-----";
+
+        let key_pem = b"-----BEGIN PRIVATE KEY-----
+MIHuAgEAMBAGByqGSM49AgEGBSuBBAAjBIHWMIHTAgEBBEIAgvZTeQgGysadAX0r
+aZB5Lk4vjHy5iVuKdvcGdYt9NBvYx+Ib3Uk7vqMag7M1jyHL0Xf9uNtT2mxBmzBG
+3CF+EgOhgYkDgYYABAA2V3ECtooYFUyXhseRSptcfkfor8oCLzJ5L9N32qtS6S1N
+3aCl9/AxDv3ElhL+bvpHI7KV3ngz4aiRQvK0QM+GsADJPg9JlxJrO8aRT4dB5iOj
+TXCXOXif/GbBCRh9Wt+MtGJ+tufYKpcAIdhIfTcdee/QQGp0a/Ja/p9bWdPU//QE
+IQ==
+-----END PRIVATE KEY-----";
+
+        // Write to temporary files
+        let mut cert_file = NamedTempFile::new().expect("Failed to create temp cert file");
+        let mut key_file = NamedTempFile::new().expect("Failed to create temp key file");
+
+        cert_file.write_all(cert_pem).expect("Failed to write cert");
+        key_file.write_all(key_pem).expect("Failed to write key");
+
+        // Call the function
+        let result = Certificate::load_cert_and_key(cert_file.path(), key_file.path());
+
+        // Assert success
+        assert!(
+            result.is_ok(),
+            "Failed to load cert and key: {:?}",
+            result.err()
+        );
+    }
+}
