@@ -16,9 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .is_ca(true)
         .key_type(KeyType::P521)
         .signature_alg(HashAlg::SHA512)
+        .alternative_names(vec!["ca.com", "www.ca.com"])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
     let root_cert = ca.build_and_self_sign()?;
-    root_cert.save("./certs/")?;
+    root_cert.save("./certs/", "mytestca")?;
 
     let ca_cert =
         Certificate::load_cert_and_key("./certs/mytestca_cert.pem", "./certs/mytestca_pkey.pem")?;
@@ -34,8 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .alternative_names(vec!["example.com", "www.example.com"])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
 
-    let middle_cert = middle.build_and_sign(&ca_cert.x509, &ca_cert.pkey)?;
-    middle_cert.save("./certs/")?;
+    let middle_cert = middle.build_and_sign(&ca_cert)?;
+    middle_cert.save("./certs/", "example.com")?;
     println!("Creating a certificate signed by the Middle CA cert...");
     let leaf = CertBuilder::new()
         .common_name("example2.com")
@@ -53,8 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into_iter()
             .collect(),
         );
-    let leaf_cert = leaf.build_and_sign(&middle_cert.x509, &middle_cert.pkey)?;
-    leaf_cert.save("./certs/")?;
+    let leaf_cert = leaf.build_and_sign(&middle_cert)?;
+    leaf_cert.save("./certs/", "example2.com")?;
 
     println!("All certificates and keys have been generated.");
     match verify_cert(&leaf_cert.x509, &ca_cert.x509, vec![&middle_cert.x509]) {

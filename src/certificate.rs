@@ -11,11 +11,14 @@ use openssl::stack::Stack;
 use openssl::x509::extension::{
     BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
 };
-use openssl::x509::{X509, X509NameBuilder, X509StoreContext, store::X509StoreBuilder};
+use openssl::x509::{
+    X509, X509Builder, X509NameBuilder, X509StoreContext, store::X509StoreBuilder,
+};
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::Path;
+
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
 
@@ -60,22 +63,39 @@ pub struct Certificate {
 }
 
 impl Certificate {
-    /// will save the certificate and private key to pem file
-    /// if path_prefix = /path/
-    /// the certificate will be saved as: /path/{CN}_cert.pem
-    /// the private key will be saved as: /path/{CN}_pkey.pem
-    /// where CN is the common name to lower case and whitespace striped away
-    pub fn save(&self, path_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let subject_name = get_clean_subject_name(&self.x509).unwrap_or("failed_getting_cn".into());
-        let pkey_pem_file = format!("{path_prefix}{subject_name}_pkey.pem");
-        let mut key_file = File::create(pkey_pem_file)?;
-        key_file.write_all(&self.pkey.private_key_to_pem_pkcs8()?)?;
-        let cert_pem_file = format!("{path_prefix}{subject_name}_cert.pem");
-        let mut cert_file = File::create(cert_pem_file)?;
-        cert_file.write_all(&self.x509.to_pem()?)?;
+    /// Will save the certificate and private key to pem file
+    /// if path = /path/foo/bar and filename = mytest
+    /// the certificate will be saved as: /path/foo/bar/mytest_cert.pem
+    /// the private key will be saved as: /path/foo/bar/mytest_pkey.pem
+    /// If the path do not exist it will be created
+    pub fn save<P: AsRef<Path>, F: AsRef<Path>>(
+        &self,
+        path: P,
+        filename: F,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        create_dir_all(&path)?;
+
+        let os_file = filename
+            .as_ref()
+            .file_name()
+            .ok_or("Failed to extract file name")?;
+
+        let write_file = |suffix: &str, content: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
+            let mut new_name = os_file.to_os_string();
+            new_name.push(suffix);
+            let full_path = path.as_ref().join(new_name);
+            let mut file = File::create(full_path)?;
+            file.write_all(content)?;
+            Ok(())
+        };
+
+        write_file("_pkey.pem", &self.pkey.private_key_to_pem_pkcs8()?)?;
+        write_file("_cert.pem", &self.x509.to_pem()?)?;
+
         Ok(())
     }
-    /// Loads a certificate and private key in PEM format from a file
+
+    /// Loads a certificate and private key that are in PEM format from file
     /// and creates an X509 and PKey object.
     pub fn load_cert_and_key<C: AsRef<Path>, K: AsRef<Path>>(
         cert_pem_file: C,
@@ -200,49 +220,7 @@ impl CertBuilder {
     }
     /// create a self signed x509 certificate and private key
     pub fn build_and_self_sign(&self) -> Result<Certificate, Box<dyn std::error::Error>> {
-        let mut name_builder = X509NameBuilder::new()?;
-        name_builder.append_entry_by_nid(Nid::COMMONNAME, &self.common_name)?;
-        if !self.country_name.trim().is_empty() {
-            name_builder.append_entry_by_nid(Nid::COUNTRYNAME, &self.country_name)?;
-        }
-        if !self.state_province.trim().is_empty() {
-            name_builder.append_entry_by_nid(Nid::STATEORPROVINCENAME, &self.state_province)?;
-        }
-        if !self.locality_time.trim().is_empty() {
-            name_builder.append_entry_by_nid(Nid::LOCALITYNAME, &self.locality_time)?;
-        }
-        if !self.organization.trim().is_empty() {
-            name_builder.append_entry_by_nid(Nid::ORGANIZATIONNAME, &self.organization)?;
-        }
-        let name = name_builder.build();
-
-        let mut builder = X509::builder()?;
-        builder.set_version(2)?;
-        let serial_number = {
-            let mut serial = BigNum::new()?;
-            serial.rand(159, openssl::bn::MsbOption::MAYBE_ZERO, false)?;
-            serial.to_asn1_integer()?
-        };
-        let pkey = select_key(&self.key_type).unwrap();
-        builder.set_serial_number(&serial_number)?;
-        builder.set_subject_name(&name)?;
-        builder.set_issuer_name(&name)?;
-        builder.set_pubkey(&pkey)?; // uses the public part of the private pkey.
-        builder.set_not_before(&self.valid_from)?;
-        builder.set_not_after(&self.valid_to)?;
-        let mut key_usage = self.usage.clone().unwrap_or_default();
-        if self.ca {
-            builder.append_extension(BasicConstraints::new().ca().build()?)?;
-            key_usage.insert(Usage::certsign);
-            key_usage.insert(Usage::crlsign);
-        }
-        let (tracked_key_usage, tracked_extendend_key_usage) = get_key_usage(&Some(key_usage));
-        if tracked_key_usage.is_used() {
-            builder.append_extension(tracked_key_usage.into_inner().build()?)?
-        }
-        if tracked_extendend_key_usage.is_used() {
-            builder.append_extension(tracked_extendend_key_usage.into_inner().build()?)?
-        }
+        let (mut builder, pkey) = self.prepare_x509_builder(None)?;
         builder.sign(&pkey, select_hash(&self.signature_alg))?;
         let ca_cert = builder.build();
 
@@ -254,19 +232,26 @@ impl CertBuilder {
     /// Create a signed certificate and private key
     pub fn build_and_sign(
         &self,
-        signer_cert: &X509,
-        signer_key: &PKey<Private>,
+        signer: &Certificate,
     ) -> Result<Certificate, Box<dyn std::error::Error>> {
-        let can_sign = can_sign_cert(&signer_cert)?;
+        let can_sign = can_sign_cert(&signer.x509)?;
         if !can_sign {
             let err = format!(
                 "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:{:?}",
-                signer_cert.issuer_name()
+                signer.x509.issuer_name()
             );
             return Err(err.into());
         }
-        let pkey = select_key(&self.key_type).unwrap();
+        let (mut builder, pkey) = self.prepare_x509_builder(Some(&signer))?;
+        builder.sign(&signer.pkey, select_hash(&self.signature_alg))?;
+        let cert = builder.build();
+        Ok(Certificate { x509: cert, pkey })
+    }
 
+    fn prepare_x509_builder(
+        &self,
+        signer: Option<&Certificate>,
+    ) -> Result<(X509Builder, PKey<Private>), Box<dyn std::error::Error>> {
         let mut name_builder = X509NameBuilder::new()?;
         name_builder.append_entry_by_nid(Nid::COMMONNAME, &self.common_name)?;
         if !self.country_name.trim().is_empty() {
@@ -285,48 +270,55 @@ impl CertBuilder {
 
         let mut builder = X509::builder()?;
         builder.set_version(2)?;
+
         let serial_number = {
             let mut serial = BigNum::new()?;
             serial.rand(159, openssl::bn::MsbOption::MAYBE_ZERO, false)?;
             serial.to_asn1_integer()?
         };
 
+        let pkey = select_key(&self.key_type).unwrap();
         builder.set_serial_number(&serial_number)?;
         builder.set_subject_name(&name)?;
-        builder.set_issuer_name(signer_cert.subject_name())?;
-        builder.set_pubkey(&pkey)?; // uses the public part of the private pkey.
+        builder.set_pubkey(&pkey)?;
         builder.set_not_before(&self.valid_from)?;
         builder.set_not_after(&self.valid_to)?;
-        let mut key_usage = self.usage.clone().unwrap_or_default();
+        match signer {
+            Some(signer) => builder.set_issuer_name(signer.x509.subject_name())?,
+            None => builder.set_issuer_name(&name)?,
+        }
 
+        let mut key_usage = self.usage.clone().unwrap_or_default();
         if self.ca {
             key_usage.insert(Usage::certsign);
             key_usage.insert(Usage::crlsign);
-            builder.append_extension(BasicConstraints::new().ca().build()?)?
+            builder.append_extension(BasicConstraints::new().ca().build()?)?;
         } else {
             builder.append_extension(BasicConstraints::new().build()?)?;
         }
-        let (tracked_key_usage, tracked_extendend_key_usage) = get_key_usage(&Some(key_usage));
+
+        let (tracked_key_usage, tracked_extended_key_usage) = get_key_usage(&Some(key_usage));
         if tracked_key_usage.is_used() {
-            builder.append_extension(tracked_key_usage.into_inner().build()?)?
+            builder.append_extension(tracked_key_usage.into_inner().build()?)?;
         }
-        if tracked_extendend_key_usage.is_used() {
-            builder.append_extension(tracked_extendend_key_usage.into_inner().build()?)?
+        if tracked_extended_key_usage.is_used() {
+            builder.append_extension(tracked_extended_key_usage.into_inner().build()?)?;
         }
-        //eku.other("1.3.6.1.5.5.7.3.4"); // E-mail Protection, same oid as non_repudiation in key usage
 
         if let Some(alt_names) = &self.alternative_names {
             let mut san = SubjectAlternativeName::new();
             for s in alt_names {
                 san.dns(s);
             }
-            builder
-                .append_extension(san.build(&builder.x509v3_context(Some(signer_cert), None))?)?;
+            if let Some(signer_cert) = signer {
+                builder.append_extension(
+                    san.build(&builder.x509v3_context(Some(&signer_cert.x509), None))?,
+                )?;
+            } else {
+                builder.append_extension(san.build(&builder.x509v3_context(None, None))?)?;
+            }
         }
-
-        builder.sign(signer_key, select_hash(&self.signature_alg))?;
-        let cert = builder.build();
-        Ok(Certificate { x509: cert, pkey })
+        Ok((builder, pkey))
     }
 }
 
@@ -411,7 +403,7 @@ impl TrackedKeyUsage {
 
 /// Verifies a certificate against a root certificate and the intermediate
 /// chain leading up to it.
-// Note: The root certificate should not be included in the chain.
+/// Note: The root certificate should not be included in the chain.
 pub fn verify_cert(
     cert: &X509,
     ca: &X509,
@@ -441,7 +433,6 @@ pub fn verify_cert(
 /// the returned vector will be `[ca1, ca2, leaf]`.
 ///
 /// If multiple valid chains are possible, the longest one is returned.
-
 pub fn create_cert_chain_from_cert_list(
     certs: Vec<X509>,
 ) -> Result<Vec<X509>, Box<dyn std::error::Error>> {
@@ -456,8 +447,8 @@ pub fn create_cert_chain_from_cert_list(
     }
 
     // Find leaf certificates (those that are not issuers of any other cert)
-    let all_issuers: Vec<_> = issuer_map.values().cloned().collect();
-    let leaf_certs: Vec<_> = subject_map
+    let all_issuers: Vec<Vec<u8>> = issuer_map.values().cloned().collect();
+    let leaf_certs: Vec<X509> = subject_map
         .iter()
         .filter(|(subject, _)| !all_issuers.contains(subject))
         .map(|(_, cert)| cert.clone())
@@ -542,6 +533,7 @@ fn select_hash(hash_type: &Option<HashAlg>) -> MessageDigest {
         _ => MessageDigest::sha256(),
     }
 }
+
 fn get_key_usage(usage: &Option<HashSet<Usage>>) -> (TrackedKeyUsage, TrackedExtendedKeyUsage) {
     let mut ku = TrackedKeyUsage::new();
     let mut eku = TrackedExtendedKeyUsage::new();
@@ -574,17 +566,6 @@ fn get_key_usage(usage: &Option<HashSet<Usage>>) -> (TrackedKeyUsage, TrackedExt
     }
 
     (ku, eku)
-}
-
-fn get_clean_subject_name(x509: &X509) -> Option<String> {
-    let subject_name = x509.subject_name();
-    if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next() {
-        if let Ok(data) = entry.data().as_utf8() {
-            let cleaned = data.to_lowercase().replace(' ', "");
-            return Some(cleaned);
-        }
-    }
-    None
 }
 
 fn can_sign_cert(cert: &X509) -> Result<bool, Box<dyn std::error::Error>> {

@@ -24,7 +24,7 @@ fn must_not_create_cert_with_non_ca_signer_cert() -> Result<(), Box<dyn std::err
     let ca = CertBuilder::new().common_name("My Test Ca");
     let root_cert = ca.build_and_self_sign()?;
     let leaf = CertBuilder::new().common_name("My Test");
-    let leaf_cert = leaf.build_and_sign(&root_cert.x509, &root_cert.pkey);
+    let leaf_cert = leaf.build_and_sign(&root_cert);
     assert!(leaf_cert.is_err(), "Expected an error but got Ok");
     Ok(())
 }
@@ -40,6 +40,7 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
         .is_ca(true)
         .key_type(KeyType::P521)
         .signature_alg(HashAlg::SHA512)
+        .alternative_names(vec!["my-alt-name"])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
 
     let root_cert = ca.build_and_self_sign()?;
@@ -51,6 +52,10 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
         x509.issuer_name().to_der().ok(),
         x509.subject_name().to_der().ok()
     );
+    // Make sure alt names was added
+    let alt_names = &x509.subject_alt_names().unwrap();
+    let dns_value = alt_names.get(0).and_then(|name| name.dnsname());
+    assert_eq!(dns_value, Some("my-alt-name"));
 
     let subject = &x509.subject_name();
     let cn = subject.entries_by_nid(Nid::COMMONNAME).next().unwrap();
@@ -62,6 +67,11 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
     assert_eq!(sig_alg.nid(), Nid::ECDSA_WITH_SHA512);
     let pubkey = &x509.public_key()?;
     assert!(pubkey.ec_key().is_ok());
+    // make sure we have the public key in the certificate
+    assert_eq!(
+        pubkey.ec_key()?.public_key_to_der().ok(),
+        root_cert.pkey.public_key_to_der().ok()
+    );
 
     Ok(())
 }
@@ -90,7 +100,7 @@ fn test_create_signed_certificate() -> Result<(), Box<dyn std::error::Error>> {
         .alternative_names(vec!["example.com", "www.example.com"])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
 
-    let middle_cert = middle.build_and_sign(&root_cert.x509, &root_cert.pkey)?;
+    let middle_cert = middle.build_and_sign(&root_cert)?;
 
     assert_eq!(
         middle_cert.x509.issuer_name().to_der().unwrap(),
@@ -136,7 +146,7 @@ fn test_verify_certificate_chain() -> Result<(), Box<dyn std::error::Error>> {
         .alternative_names(vec!["example.com", "www.example.com"])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
 
-    let middle_cert = middle.build_and_sign(&root_cert_one.x509, &root_cert_one.pkey)?;
+    let middle_cert = middle.build_and_sign(&root_cert_one)?;
     println!("Creating a certificate signed by the Middle CA cert...");
     let leaf = CertBuilder::new()
         .common_name("example2.com")
@@ -154,7 +164,7 @@ fn test_verify_certificate_chain() -> Result<(), Box<dyn std::error::Error>> {
             .into_iter()
             .collect(),
         );
-    let leaf_cert = leaf.build_and_sign(&middle_cert.x509, &middle_cert.pkey)?;
+    let leaf_cert = leaf.build_and_sign(&middle_cert)?;
 
     // this is a correct signed certificate chain and should be verified as true
     let result = verify_cert(
@@ -178,13 +188,13 @@ fn sort_list_of_certificates_in_signing_order() -> Result<(), Box<dyn std::error
     let cert = CertBuilder::new().common_name("Cert-1").is_ca(true);
     let cert_1 = cert.build_and_self_sign()?;
     let cert = CertBuilder::new().common_name("Cert-2").is_ca(true);
-    let cert_2 = cert.build_and_sign(&cert_1.x509, &cert_1.pkey)?;
+    let cert_2 = cert.build_and_sign(&cert_1)?;
     let cert = CertBuilder::new().common_name("Cert-3").is_ca(true);
-    let cert_3 = cert.build_and_sign(&cert_2.x509, &cert_2.pkey)?;
+    let cert_3 = cert.build_and_sign(&cert_2)?;
     let cert = CertBuilder::new().common_name("Cert-4").is_ca(true);
-    let cert_4 = cert.build_and_sign(&cert_3.x509, &cert_3.pkey)?;
+    let cert_4 = cert.build_and_sign(&cert_3)?;
     let cert = CertBuilder::new().common_name("Cert-5");
-    let cert_5 = cert.build_and_sign(&cert_4.x509, &cert_4.pkey)?;
+    let cert_5 = cert.build_and_sign(&cert_4)?;
     let certs = vec![
         cert_3.x509,
         cert_1.x509,
@@ -212,8 +222,11 @@ fn get_clean_subject_name(x509: &X509) -> Option<String> {
     None
 }
 /// Note: only used for simple check in test not valid in
-/// real senarios, check the library function can_sign_cert
-/// on how to do correct check
+/// real senarios as we scan the text version of the certificate and the user
+/// can supply these fields in for example organization.
+///
+/// Check the function can_sign_cert in certificate.rs file on how to do
+/// correct check by fetching the exact extesnsions.
 fn has_cert_and_crl_sign(cert: &X509) -> bool {
     if let Ok(text) = cert.to_text() {
         let text = String::from_utf8_lossy(&text);

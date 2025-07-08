@@ -1,4 +1,5 @@
 /target
-/certs/*.pem
+/examples/certs/*.pem
 multiple_cert.pem
 read_certs.rs
+/certs

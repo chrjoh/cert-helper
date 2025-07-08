@@ -2,10 +2,50 @@
 
 ## Description
 
-Simple wrapper around opnessl crate for creating x509 certificates and keys.
-Have some small utility function for reading, saving and validating certificates
+A lightweight wrapper around the OpenSSL crate for working with X.509 certificates and private keys.
 
-The certificate used to sign another certificate need to have CA set to true and Key usage certsign.
+This library provides a set of utility functions to simplify common tasks such as:
+
+- Creating self-signed or CA-signed certificates
+- Generating RSA private keys
+- Reading and writing certificates and keys in PEM format
+- Validating certificate chains and properties
+
+### Certificate Signing Requirements
+
+To sign another certificate, the signing certificate must:
+
+- Have the `CA` (Certificate Authority) flag set to `true`
+- Include the `KeyUsage` extension with the `keyCertSign` bit enabled
+
+These constraints ensure that the certificate is recognized as a valid CA and can be used to issue other certificates.
+
+### Use Cases
+
+- Generating certificates for local development or internal services
+- Creating a simple certificate authority for testing
+- Validating certificate chains in custom TLS setups
+
+## Basic Example
+
+```rust
+use cert_helper::certificate::{CertBuilder, Certificate, HashAlg, KeyType, Usage, verify_cert};
+
+// create a self signed certificate with several optional values set
+let ca = CertBuilder::new()
+    .common_name("My Test Ca")
+    .country_name("SE")
+    .state_province("Stockholm")
+    .organization("my org")
+    .locality_time("Stockholm")
+    .is_ca(true)
+    .key_type(KeyType::P521)
+    .signature_alg(HashAlg::SHA512)
+    .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
+let root_cert = ca.build_and_self_sign();
+assert!(root_cert.is_ok())
+
+```
 
 ## Config
 
