@@ -617,8 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn rea_certificate_and_key_from_file() {
-        // PEM-formatted certificate and private key
+    fn read_certificate_and_key_from_file() {
         let cert_pem = b"-----BEGIN CERTIFICATE-----
 MIICiDCCAemgAwIBAgIUO3+y1WZPRRNs8dmZZTUHMj6TdiowCgYIKoZIzj0EAwQw
 WzETMBEGA1UEAwwKTXkgVGVzdCBDYTELMAkGA1UEBhMCU0UxEjAQBgNVBAgMCVN0
@@ -645,17 +644,13 @@ TXCXOXif/GbBCRh9Wt+MtGJ+tufYKpcAIdhIfTcdee/QQGp0a/Ja/p9bWdPU//QE
 IQ==
 -----END PRIVATE KEY-----";
 
-        // Write to temporary files
         let mut cert_file = NamedTempFile::new().expect("Failed to create temp cert file");
         let mut key_file = NamedTempFile::new().expect("Failed to create temp key file");
 
         cert_file.write_all(cert_pem).expect("Failed to write cert");
         key_file.write_all(key_pem).expect("Failed to write key");
 
-        // Call the function
         let result = Certificate::load_cert_and_key(cert_file.path(), key_file.path());
-
-        // Assert success
         assert!(
             result.is_ok(),
             "Failed to load cert and key: {:?}",
