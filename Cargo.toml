@@ -13,7 +13,7 @@ keywords = ["x509", "Certificates"]
 categories = ["cryptography"]
 license = "MIT"
 
-#documentation = "https://docs.rs/your_crate_name"
+documentation = "https://docs.rs/cert-helper"
 homepage = "https://github.com/chrjoh/cert-helper"
 repository = "https://github.com/chrjoh/cert-helper"
 
