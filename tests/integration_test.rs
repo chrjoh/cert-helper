@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use cert_helper::certificate::{
     CertBuilder, HashAlg, KeyType, Usage, create_cert_chain_from_cert_list, verify_cert,
 };
@@ -19,6 +21,31 @@ fn create_minimal_self_signed_cert() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[test]
+fn test_add_multiple_key_usage() -> Result<(), Box<dyn std::error::Error>> {
+    let ca = CertBuilder::new()
+        .common_name("My Test")
+        .key_usage(HashSet::from_iter([Usage::serverauth]))
+        .key_usage(HashSet::from_iter([Usage::contentcommitment]));
+    let root_cert = ca.build_and_self_sign()?;
+    let x509 = root_cert.x509;
+    let checker = |x509: &X509| -> bool {
+        if let Ok(text) = x509.to_text() {
+            let text = String::from_utf8_lossy(&text);
+            text.contains("X509v3 Key Usage")
+                && text.contains("Non Repudiation")
+                && text.contains("X509v3 Extended Key Usage")
+                && text.contains("TLS Web Server Authentication")
+        } else {
+            false
+        }
+    };
+
+    if !checker(&x509) {
+        return Err("Missing Key and extended Key usage".into());
+    }
+    Ok(())
+}
 #[test]
 fn must_not_create_cert_with_non_ca_signer_cert() -> Result<(), Box<dyn std::error::Error>> {
     let ca = CertBuilder::new().common_name("My Test Ca");

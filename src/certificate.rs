@@ -219,7 +219,14 @@ impl CertBuilder {
     }
     /// Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
     pub fn key_usage(mut self, key_usage: HashSet<Usage>) -> Self {
-        self.usage = Some(key_usage);
+        match &mut self.usage {
+            Some(existing_usage) => {
+                existing_usage.extend(key_usage);
+            }
+            None => {
+                self.usage = Some(key_usage);
+            }
+        };
         self
     }
     /// create a self signed x509 certificate and private key
