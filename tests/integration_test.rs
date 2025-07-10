@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use cert_helper::certificate::{
-    CertBuilder, HashAlg, KeyType, Usage, create_cert_chain_from_cert_list, verify_cert,
+    CertBuilder, HashAlg, KeyType, Usage, UseesBuilderFields, create_cert_chain_from_cert_list,
+    verify_cert,
 };
 use openssl::nid::Nid;
 use openssl::x509::X509;

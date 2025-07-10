@@ -175,12 +175,10 @@ pub trait BuilderCommon {
     fn set_key_type(&mut self, key_type: KeyType);
     fn set_signature_alg(&mut self, signature_alg: HashAlg);
     fn set_is_ca(&mut self, ca: bool);
-    fn set_valid_to(&mut self, valid_to: &str);
-    fn set_valid_from(&mut self, valid_from: &str);
     fn set_key_usage(&mut self, key_usage: HashSet<Usage>);
 }
 
-struct BuilderFields {
+pub struct BuilderFields {
     common_name: String,
     signer: Option<String>, //place holder for maybe future use??
     alternative_names: HashSet<String>,
@@ -191,8 +189,6 @@ struct BuilderFields {
     key_type: Option<KeyType>,
     signature_alg: Option<HashAlg>,
     ca: bool,
-    valid_from: Asn1Time,
-    valid_to: Asn1Time,
     usage: Option<HashSet<Usage>>,
 }
 impl BuilderCommon for BuilderFields {
@@ -238,16 +234,6 @@ impl BuilderCommon for BuilderFields {
     fn set_is_ca(&mut self, ca: bool) {
         self.ca = ca;
     }
-    // start date that the certificate should be valid yyyy-mm-dd
-    fn set_valid_from(&mut self, valid_from: &str) {
-        self.valid_from =
-            create_asn1_time_from_date(valid_from).expect("Failed to parse valid_from date");
-    }
-    // end date that the certificate should no longer be valid yyyy-mm-dd
-    fn set_valid_to(&mut self, valid_to: &str) {
-        self.valid_to =
-            create_asn1_time_from_date(valid_to).expect("Failed to parse valid_to date");
-    }
     // Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
     fn set_key_usage(&mut self, key_usage: HashSet<Usage>) {
         match &mut self.usage {
@@ -260,6 +246,7 @@ impl BuilderCommon for BuilderFields {
         };
     }
 }
+
 impl Default for BuilderFields {
     /// Returns default values for all fields, except valid_from,
     /// which is set to the current time, and valid_to, which is
@@ -276,89 +263,103 @@ impl Default for BuilderFields {
             key_type: Default::default(),
             signature_alg: Default::default(),
             ca: false,
-            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
-            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
             usage: Default::default(),
         }
+    }
+}
+pub trait UseesBuilderFields: Sized {
+    fn fields_mut(&mut self) -> &mut BuilderFields;
+
+    /// Sets the common name, CN. This value will also be added to alternaitve_names
+    fn common_name(mut self, common_name: &str) -> Self {
+        self.fields_mut().set_common_name(common_name);
+        self
+    }
+    fn signer(mut self, signer: &str) -> Self {
+        self.fields_mut().set_signer(signer);
+        self
+    }
+    /// A list of altrnative names(SAN) the Common Name(CN) is always included
+    fn alternative_names(mut self, alternative_names: Vec<&str>) -> Self {
+        self.fields_mut().set_alternative_names(alternative_names);
+        self
+    }
+    /// Country, a valid two char value
+    fn country_name(mut self, country_name: &str) -> Self {
+        self.fields_mut().set_country_name(country_name);
+        self
+    }
+    /// State, province an utf-8 value
+    fn state_province(mut self, state_province: &str) -> Self {
+        self.fields_mut().set_state_province(state_province);
+        self
+    }
+    /// Org. an utf-8 value
+    fn organization(mut self, organization: &str) -> Self {
+        self.fields_mut().set_organization(organization);
+        self
+    }
+    /// Locality, represents the city, town, or locality of the certificate subject
+    fn locality_time(mut self, locality_time: &str) -> Self {
+        self.fields_mut().set_locality_time(locality_time);
+        self
+    }
+    /// Selects what type of key to use RSA or elliptic
+    fn key_type(mut self, key_type: KeyType) -> Self {
+        self.fields_mut().set_key_type(key_type);
+        self
+    }
+    /// Selects what alg to use for signature
+    fn signature_alg(mut self, signature_alg: HashAlg) -> Self {
+        self.fields_mut().set_signature_alg(signature_alg);
+        self
+    }
+    /// if this certificate be a Certificate Authority (CN)
+    fn is_ca(mut self, ca: bool) -> Self {
+        self.fields_mut().set_is_ca(ca);
+        self
+    }
+
+    /// Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
+    fn key_usage(mut self, key_usage: HashSet<Usage>) -> Self {
+        self.fields_mut().set_key_usage(key_usage);
+        self
     }
 }
 
 /// Builder for creating a new certificate and private key
 pub struct CertBuilder {
     fields: BuilderFields,
+    valid_from: Asn1Time,
+    valid_to: Asn1Time,
 }
-
+impl UseesBuilderFields for CertBuilder {
+    fn fields_mut(&mut self) -> &mut BuilderFields {
+        &mut self.fields
+    }
+}
 impl CertBuilder {
     /// Create a new CertBuilder with defaults and one year from now as valid date
     pub fn new() -> Self {
         Self {
             fields: BuilderFields::default(),
+            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
+            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
         }
     }
-    /// Sets the common name, CN. This value will also be added to alternaitve_names
-    pub fn common_name(mut self, common_name: &str) -> Self {
-        self.fields.set_common_name(common_name);
-        self
-    }
-    pub fn signer(mut self, signer: &str) -> Self {
-        self.fields.set_signer(signer);
-        self
-    }
-    /// A list of altrnative names(SAN) the Common Name(CN) is always included
-    pub fn alternative_names(mut self, alternative_names: Vec<&str>) -> Self {
-        self.fields.set_alternative_names(alternative_names);
-        self
-    }
-    /// Country, a valid two char value
-    pub fn country_name(mut self, country_name: &str) -> Self {
-        self.fields.set_country_name(country_name);
-        self
-    }
-    /// State, province an utf-8 value
-    pub fn state_province(mut self, state_province: &str) -> Self {
-        self.fields.set_state_province(state_province);
-        self
-    }
-    /// Org. an utf-8 value
-    pub fn organization(mut self, organization: &str) -> Self {
-        self.fields.set_organization(organization);
-        self
-    }
-    /// Locality, represents the city, town, or locality of the certificate subject
-    pub fn locality_time(mut self, locality_time: &str) -> Self {
-        self.fields.set_locality_time(locality_time);
-        self
-    }
-    /// Selects what type of key to use RSA or elliptic
-    pub fn key_type(mut self, key_type: KeyType) -> Self {
-        self.fields.set_key_type(key_type);
-        self
-    }
-    /// Selects what alg to use for signature
-    pub fn signature_alg(mut self, signature_alg: HashAlg) -> Self {
-        self.fields.set_signature_alg(signature_alg);
-        self
-    }
-    /// if this certificate be a Certificate Authority (CN)
-    pub fn is_ca(mut self, ca: bool) -> Self {
-        self.fields.set_is_ca(ca);
-        self
-    }
-    /// start date that the certificate should be valid yyyy-mm-dd
+    // start date that the certificate should be valid yyyy-mm-dd
     pub fn valid_from(mut self, valid_from: &str) -> Self {
-        self.fields.set_valid_from(valid_from);
+        self.valid_from =
+            create_asn1_time_from_date(valid_from).expect("Failed to parse valid_from date");
         self
     }
-    /// end date that the certificate should no longer be valid yyyy-mm-dd
+    // end date that the certificate should no longer be valid yyyy-mm-dd
     pub fn valid_to(mut self, valid_to: &str) -> Self {
-        self.fields.set_valid_to(valid_to);
+        self.valid_to =
+            create_asn1_time_from_date(valid_to).expect("Failed to parse valid_to date");
         self
     }
-    /// Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
-    pub fn key_usage(mut self, key_usage: HashSet<Usage>) -> Self {
-        self.fields.set_key_usage(key_usage);
-        self
-    }
+
     /// create a self signed x509 certificate and private key
     pub fn build_and_self_sign(&self) -> Result<Certificate, Box<dyn std::error::Error>> {
         let (mut builder, pkey) = self.prepare_x509_builder(None)?;
@@ -367,7 +368,7 @@ impl CertBuilder {
 
         Ok(Certificate {
             x509: ca_cert,
-            pkey: pkey,
+            pkey,
         })
     }
     /// Create a signed certificate and private key
@@ -423,8 +424,8 @@ impl CertBuilder {
         builder.set_serial_number(&serial_number)?;
         builder.set_subject_name(&name)?;
         builder.set_pubkey(&pkey)?;
-        builder.set_not_before(&self.fields.valid_from)?;
-        builder.set_not_after(&self.fields.valid_to)?;
+        builder.set_not_before(&self.valid_from)?;
+        builder.set_not_after(&self.valid_to)?;
         match signer {
             Some(signer) => builder.set_issuer_name(signer.x509.subject_name())?,
             None => builder.set_issuer_name(&name)?,
@@ -459,6 +460,24 @@ impl CertBuilder {
             builder.append_extension(san.build(&builder.x509v3_context(None, None))?)?;
         }
         Ok((builder, pkey))
+    }
+}
+
+/// Builder for creating a new certificate signing request and private key
+pub struct CsrBuilder {
+    fields: BuilderFields,
+}
+impl UseesBuilderFields for CsrBuilder {
+    fn fields_mut(&mut self) -> &mut BuilderFields {
+        &mut self.fields
+    }
+}
+impl CsrBuilder {
+    /// Create a new CsrBuilder with defaults
+    pub fn new() -> Self {
+        Self {
+            fields: BuilderFields::default(),
+        }
     }
     pub fn certificate_signing_request(self) -> Result<Csr, Box<dyn std::error::Error>> {
         let mut name_builder = X509NameBuilder::new()?;
@@ -505,7 +524,6 @@ impl CertBuilder {
         Ok(Csr { csr, pkey })
     }
 }
-
 struct TrackedExtendedKeyUsage {
     inner: ExtendedKeyUsage,
     used: bool,

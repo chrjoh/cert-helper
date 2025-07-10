@@ -1,5 +1,6 @@
 use cert_helper::certificate::{
-    CertBuilder, Certificate, HashAlg, KeyType, Usage, X509Common, verify_cert,
+    CertBuilder, Certificate, CsrBuilder, HashAlg, KeyType, Usage, UseesBuilderFields, X509Common,
+    verify_cert,
 };
 use std::fs;
 
@@ -67,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // csr
-    let csr_builder = CertBuilder::new()
+    let csr_builder = CsrBuilder::new()
         .common_name("example2.com")
         .country_name("SE")
         .state_province("Stockholm")

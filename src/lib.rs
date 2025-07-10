@@ -22,9 +22,9 @@
 //! - Creating a simple certificate authority for testing
 //! - Validating certificate chains in custom TLS setups
 //!
-//! ## Basic Example
+//! ## Basic Example creating a certificate and private key
 //! ```rust
-//! use cert_helper::certificate::{CertBuilder, Certificate, HashAlg, KeyType, Usage, verify_cert};
+//! use cert_helper::certificate::{CertBuilder, Certificate, HashAlg, KeyType, Usage, verify_cert, UseesBuilderFields};
 //!
 //! // create a self signed certificate with several optional values set
 //! let ca = CertBuilder::new()
@@ -39,6 +39,34 @@
 //!     .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
 //! let root_cert = ca.build_and_self_sign();
 //! assert!(root_cert.is_ok())
+//! // to write data to file you need to use X509Common to access the save
+//! // ca.save("./certs/", "mytestca")?;
+//!```
+//! ## Basic Example creating a certificate signing request and private key
+//! ```rust
+//! use cert_helper::certificate::{HashAlg, KeyType, Usage, Csr, verify_cert, UseesBuilderFields,CsrBuilder};
+//!
+//! // create a certificate signing request and private key
+//! let csr_builder = CsrBuilder::new()
+//!    .common_name("example2.com")
+//!    .country_name("SE")
+//!    .state_province("Stockholm")
+//!    .organization("My org")
+//!    .locality_time("Stockholm")
+//!    .alternative_names(vec!["example2.com", "www.example2.com"])
+//!    .key_usage(
+//!        [
+//!            Usage::contentcommitment,
+//!            Usage::encipherment,
+//!            Usage::serverauth,
+//!        ]
+//!        .into_iter()
+//!        .collect(),
+//!    );
+//! let csr = csr_builder.certificate_signing_request();
+//! assert!(csr.is_ok());
+//! // to write data to file you need to use X509Common to access the save
+//! // csr.save("./certs/", "mytestca")?;
 //!
 //!```
 //! ## Config
