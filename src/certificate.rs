@@ -147,7 +147,7 @@ impl X509Parts for Csr {
     }
 }
 impl Csr {
-    /// read a certificate signing request from file
+    /// Read a certificate signing request from file
     pub fn load_csr<C: AsRef<Path>>(csr_pem_file: C) -> Result<Self, Box<dyn std::error::Error>> {
         let cert_pem = std::fs::read(csr_pem_file)?;
         let cs_req = X509Req::from_pem(&cert_pem)?;

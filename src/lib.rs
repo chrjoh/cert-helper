@@ -104,7 +104,7 @@
 //! | signature_alg | which algorithm to be used for signature, default is SHA256 | senum: SHA1, SHA256, SHA384, SHA512 |
 //! | valid_from | Start date then the certificate is valid, default is now | string: 2010-01-01 |
 //! | valid_to | End date then the certificate is not valid, default is 1 year | string: 2020-01-01 |
-//! | usage | Key usage to ad to the certificates, see list below for options | list of enums, defined in Key Usage table |
+//! | usage | Key usage to add to the certificates, see list below for options | list of enums, defined in Key Usage table |
 //!
 //! ### Key usage
 //!
