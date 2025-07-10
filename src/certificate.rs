@@ -19,7 +19,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::Path;
+use x509_parser::prelude::FromDer;
 
+use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
 
@@ -115,8 +117,10 @@ impl<T: X509Parts> X509Common for T {
             file.write_all(content)?;
             Ok(())
         };
-
-        write_file("_pkey.pem", &self.get_private_key()?)?;
+        match self.get_private_key() {
+            Ok(ref key) => write_file("_pkey.pem", key)?,
+            Err(_) => {}
+        }
         write_file(&self.pem_extension(), &self.get_pem()?)?;
 
         Ok(())
@@ -125,7 +129,7 @@ impl<T: X509Parts> X509Common for T {
 /// Holds the generated certificate signing request and private key
 pub struct Csr {
     pub csr: X509Req,
-    pub pkey: PKey<Private>,
+    pub pkey: Option<PKey<Private>>,
 }
 
 impl X509Parts for Csr {
@@ -134,16 +138,113 @@ impl X509Parts for Csr {
     }
 
     fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(self.pkey.private_key_to_pem_pkcs8()?)
+        match self.pkey {
+            Some(ref pkey) => Ok(pkey.private_key_to_pem_pkcs8()?),
+            _ => Err("No private key found".into()),
+        }
     }
     fn pem_extension(&self) -> &'static str {
         "_csr.pem"
     }
 }
+impl Csr {
+    /// Create a signed certificate from a certificate signing request(csr)
+    /// TODO: check key usage fields not empty befor adding
+    /// TODO: add read csr from file
+    pub fn build_signed_certificate(
+        &self,
+        signer: &Certificate,
+        days_valid: u32,
+    ) -> Result<Certificate, Box<dyn std::error::Error>> {
+        let mut builder = X509Builder::new()?;
+        builder.set_version(2)?;
+        builder.set_subject_name(self.csr.subject_name())?;
+        builder.set_issuer_name(signer.x509.subject_name())?;
+        let csr_public_key = self.csr.public_key()?;
+        builder.set_pubkey(&csr_public_key)?;
+
+        let der = self.csr.to_der()?;
+        let parsed_csr = X509CertificationRequest::from_der(&der)?;
+
+        let req_ext = parsed_csr.1.requested_extensions();
+        if let Some(exts) = req_ext {
+            for ext in exts {
+                match ext {
+                    ParsedExtension::KeyUsage(ku) => {
+                        let mut usage = openssl::x509::extension::KeyUsage::new();
+                        if ku.digital_signature() {
+                            usage.digital_signature();
+                        }
+                        if ku.key_encipherment() {
+                            usage.key_encipherment();
+                        }
+                        if ku.key_cert_sign() {
+                            usage.key_cert_sign();
+                        }
+                        if ku.non_repudiation() {
+                            usage.non_repudiation();
+                        }
+                        if ku.crl_sign() {
+                            usage.crl_sign();
+                        }
+
+                        builder.append_extension(usage.build()?)?;
+                    }
+                    ParsedExtension::ExtendedKeyUsage(eku) => {
+                        let mut ext = openssl::x509::extension::ExtendedKeyUsage::new();
+                        if eku.server_auth {
+                            ext.server_auth();
+                        }
+                        if eku.client_auth {
+                            ext.client_auth();
+                        }
+                        if eku.code_signing {
+                            ext.code_signing();
+                        }
+                        if eku.email_protection {
+                            ext.email_protection();
+                        }
+                        builder.append_extension(ext.build()?)?;
+                    }
+                    ParsedExtension::SubjectAlternativeName(san) => {
+                        let mut openssl_san =
+                            openssl::x509::extension::SubjectAlternativeName::new();
+                        for name in &san.general_names {
+                            if let x509_parser::extensions::GeneralName::DNSName(dns) = name {
+                                openssl_san.dns(dns);
+                            }
+                        }
+                        builder.append_extension(
+                            openssl_san.build(&builder.x509v3_context(None, None))?,
+                        )?;
+                    }
+                    _ => {
+                        println!("Unsupported extension: {:?}", ext);
+                    }
+                }
+            }
+        }
+        builder.set_not_before(Asn1Time::days_from_now(0)?.as_ref())?;
+        builder.set_not_after(Asn1Time::days_from_now(days_valid)?.as_ref())?;
+        let serial_number = {
+            let mut serial = BigNum::new()?;
+            serial.rand(159, openssl::bn::MsbOption::MAYBE_ZERO, false)?;
+            serial.to_asn1_integer()?
+        };
+        builder.set_serial_number(&serial_number)?;
+        builder.sign(signer.pkey.as_ref().unwrap(), MessageDigest::sha256())?;
+        let cert = builder.build();
+
+        Ok(Certificate {
+            x509: cert,
+            pkey: None,
+        })
+    }
+}
 /// Holds the generated certificate and private key
 pub struct Certificate {
     pub x509: X509,
-    pub pkey: PKey<Private>,
+    pub pkey: Option<PKey<Private>>,
 }
 
 impl X509Parts for Certificate {
@@ -152,7 +253,10 @@ impl X509Parts for Certificate {
     }
 
     fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(self.pkey.private_key_to_pem_pkcs8()?)
+        match self.pkey {
+            Some(ref pkey) => Ok(pkey.private_key_to_pem_pkcs8()?),
+            _ => Err("No private key found".into()),
+        }
     }
     fn pem_extension(&self) -> &'static str {
         "_cert.pem"
@@ -170,7 +274,10 @@ impl Certificate {
         let key_pem = std::fs::read(key_pem_file)?;
         let cert = X509::from_pem(&cert_pem)?;
         let pkey = PKey::private_key_from_pem(&key_pem)?;
-        Ok(Self { x509: cert, pkey })
+        Ok(Self {
+            x509: cert,
+            pkey: Some(pkey),
+        })
     }
 }
 
@@ -379,7 +486,7 @@ impl CertBuilder {
 
         Ok(Certificate {
             x509: ca_cert,
-            pkey,
+            pkey: Some(pkey),
         })
     }
     /// Create a signed certificate and private key
@@ -396,9 +503,13 @@ impl CertBuilder {
             return Err(err.into());
         }
         let (mut builder, pkey) = self.prepare_x509_builder(Some(&signer))?;
-        builder.sign(&signer.pkey, select_hash(&self.fields.signature_alg))?;
+        let signer_key = signer.pkey.as_ref().unwrap();
+        builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
         let cert = builder.build();
-        Ok(Certificate { x509: cert, pkey })
+        Ok(Certificate {
+            x509: cert,
+            pkey: Some(pkey),
+        })
     }
 
     fn prepare_x509_builder(
@@ -532,7 +643,10 @@ impl CsrBuilder {
         builder.add_extensions(&extensions)?;
         builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
         let csr = builder.build();
-        Ok(Csr { csr, pkey })
+        Ok(Csr {
+            csr,
+            pkey: Some(pkey),
+        })
     }
 }
 struct TrackedExtendedKeyUsage {

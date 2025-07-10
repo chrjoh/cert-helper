@@ -86,6 +86,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     let csr = csr_builder.certificate_signing_request()?;
     csr.save("./certs", "my_test")?;
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .country_name("SE")
+        .state_province("Stockholm")
+        .organization("my org")
+        .locality_time("Stockholm")
+        .is_ca(true)
+        .key_type(KeyType::P521)
+        .signature_alg(HashAlg::SHA512)
+        .alternative_names(vec!["ca.com", "www.ca.com"])
+        .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
+    let root_cert = ca.build_and_self_sign()?;
+    let new_cert_from_csr = csr.build_signed_certificate(&root_cert, 365)?;
+    new_cert_from_csr.save("./certs", "new_cert_from_csr")?;
 
     Ok(())
 }

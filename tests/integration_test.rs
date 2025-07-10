@@ -96,7 +96,7 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
     // make sure we have the public key in the certificate
     assert_eq!(
         pubkey.ec_key()?.public_key_to_der().ok(),
-        root_cert.pkey.public_key_to_der().ok()
+        root_cert.pkey.unwrap().public_key_to_der().ok()
     );
 
     Ok(())
