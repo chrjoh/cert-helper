@@ -7,8 +7,10 @@ A lightweight wrapper around the OpenSSL crate for working with X.509 certificat
 This library provides a set of utility functions to simplify common tasks such as:
 
 - Creating self-signed or CA-signed certificates
-- Generating RSA private keys
-- Reading and writing certificates and keys in PEM format
+- Generating RSA/ECDSA private keys
+- Creating Certificate Signing Requests (CSRs)
+- Signing certificates from CSRs using a CA certificate and key
+- Reading and writing certificates, keys, and CSRs in PEM format
 - Validating certificate chains and properties
 
 ### Certificate Signing Requirements
@@ -25,11 +27,13 @@ These constraints ensure that the certificate is recognized as a valid CA and ca
 - Generating certificates for local development or internal services
 - Creating a simple certificate authority for testing
 - Validating certificate chains in custom TLS setups
+- Creating CSRs to be signed by external or internal CAs
+- Issuing signed certificates from CSRs for controlled certificate management
 
-## Basic Example
+## Basic Example creating a certificate and private key
 
 ```rust
-use cert_helper::certificate::{CertBuilder, Certificate, HashAlg, KeyType, Usage, verify_cert};
+use cert_helper::certificate::{CertBuilder, Certificate, HashAlg, KeyType, Usage, verify_cert, UseesBuilderFields};
 
 // create a self signed certificate with several optional values set
 let ca = CertBuilder::new()
@@ -44,7 +48,53 @@ let ca = CertBuilder::new()
     .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
 let root_cert = ca.build_and_self_sign();
 assert!(root_cert.is_ok())
+// to write data to file you need to use X509Common to access the save
+// ca.save("./certs/", "mytestca")?;
+```
 
+## Basic Example creating a certificate signing request and private key
+
+```rust
+use cert_helper::certificate::{HashAlg, KeyType, Usage, Csr, verify_cert, UseesBuilderFields,CsrBuilder};
+
+// create a certificate signing request and private key
+let csr_builder = CsrBuilder::new()
+   .common_name("example2.com")
+   .country_name("SE")
+   .state_province("Stockholm")
+   .organization("My org")
+   .locality_time("Stockholm")
+   .alternative_names(vec!["example2.com", "www.example2.com"])
+   .key_usage(
+       [
+           Usage::contentcommitment,
+           Usage::encipherment,
+           Usage::serverauth,
+       ]
+       .into_iter()
+       .collect(),
+   );
+let csr = csr_builder.certificate_signing_request();
+assert!(csr.is_ok());
+
+// to write data to file you need to use X509Common to access the save
+// csr.save("./certs/", "mytestca")?;
+
+```
+
+## Basic Example creating a signed certificate from a signing request
+
+```rust
+use cert_helper::certificate::{CertBuilder, HashAlg, KeyType, Usage, Csr, verify_cert, UseesBuilderFields,CsrBuilder};
+
+let ca = CertBuilder::new().common_name("My Test Ca").is_ca(true);
+let root_cert = ca.build_and_self_sign().expect("failed to create root certificate");
+
+let csr_builder = CsrBuilder::new().common_name("example2.com");
+let csr = csr_builder.certificate_signing_request().expect("Failed to generate csr");
+
+let cert = csr.build_signed_certificate(&root_cert,365);
+assert!(cert.is_ok());
 ```
 
 ## Config
