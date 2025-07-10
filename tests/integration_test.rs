@@ -1,10 +1,10 @@
-use std::collections::HashSet;
-
 use cert_helper::certificate::{
-    CertBuilder, HashAlg, KeyType, Usage, create_cert_chain_from_cert_list, verify_cert,
+    CertBuilder, CsrBuilder, HashAlg, KeyType, Usage, UseesBuilderFields,
+    create_cert_chain_from_cert_list, verify_cert,
 };
 use openssl::nid::Nid;
 use openssl::x509::X509;
+use std::collections::HashSet;
 
 #[test]
 fn create_minimal_self_signed_cert() -> Result<(), Box<dyn std::error::Error>> {
@@ -96,7 +96,7 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
     // make sure we have the public key in the certificate
     assert_eq!(
         pubkey.ec_key()?.public_key_to_der().ok(),
-        root_cert.pkey.public_key_to_der().ok()
+        root_cert.pkey.unwrap().public_key_to_der().ok()
     );
 
     Ok(())
@@ -238,6 +238,51 @@ fn sort_list_of_certificates_in_signing_order() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+#[test]
+fn create_a_certificate_signing_request() -> Result<(), Box<dyn std::error::Error>> {
+    let csr_builder = CsrBuilder::new()
+        .common_name("example2.com")
+        .country_name("SE")
+        .state_province("Stockholm")
+        .organization("My org")
+        .locality_time("Stockholm")
+        .alternative_names(vec!["example2.com", "www.example2.com"])
+        .key_usage(
+            [
+                Usage::contentcommitment,
+                Usage::encipherment,
+                Usage::serverauth,
+            ]
+            .into_iter()
+            .collect(),
+        );
+    let csr = csr_builder.certificate_signing_request()?;
+    let subject_name = csr.csr.subject_name();
+    let mut cn = subject_name.entries_by_nid(Nid::COMMONNAME);
+    let name = cn.next().unwrap().data().as_utf8().unwrap().to_string();
+    assert_eq!(name, "example2.com");
+    Ok(())
+}
+
+#[test]
+fn create_signed_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>> {
+    let ca = CertBuilder::new().common_name("My Test Ca").is_ca(true);
+    let root_cert = ca.build_and_self_sign()?;
+    let csr_builder = CsrBuilder::new().common_name("example2.com");
+    let csr = csr_builder.certificate_signing_request()?;
+    let cert = csr.build_signed_certificate(&root_cert, "2045-01-01")?;
+
+    assert_eq!(
+        get_clean_subject_name(&cert.x509),
+        Some("example2.com".into())
+    );
+    assert_eq!(
+        cert.x509.issuer_name().to_der().unwrap(),
+        root_cert.x509.subject_name().to_der().unwrap()
+    );
+    Ok(())
+}
+
 fn get_clean_subject_name(x509: &X509) -> Option<String> {
     let subject_name = x509.subject_name();
     if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next() {
@@ -247,6 +292,7 @@ fn get_clean_subject_name(x509: &X509) -> Option<String> {
     }
     None
 }
+
 /// Note: only used for simple check in test not valid in
 /// real senarios as we scan the text version of the certificate and the user
 /// can supply these fields in for example organization.

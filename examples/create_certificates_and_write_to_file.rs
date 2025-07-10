@@ -1,5 +1,9 @@
-use cert_helper::certificate::{CertBuilder, Certificate, HashAlg, KeyType, Usage, verify_cert};
+use cert_helper::certificate::{
+    CertBuilder, Certificate, CsrBuilder, HashAlg, KeyType, Usage, UseesBuilderFields, X509Common,
+    verify_cert,
+};
 use std::fs;
+
 /// Create three certificates as a chain
 /// ca->middle->leaf
 /// saves the crtificates and private keys in the folder certs
@@ -62,5 +66,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(true) => println!("verify ok"),
         _ => println!("failed verify"),
     }
+
+    // csr
+    let csr_builder = CsrBuilder::new()
+        .common_name("example2.com")
+        .country_name("SE")
+        .state_province("Stockholm")
+        .organization("My org")
+        .locality_time("Stockholm")
+        .alternative_names(vec!["example2.com", "www.example2.com"])
+        .key_usage(
+            [
+                Usage::contentcommitment,
+                Usage::encipherment,
+                Usage::serverauth,
+            ]
+            .into_iter()
+            .collect(),
+        );
+    let csr = csr_builder.certificate_signing_request()?;
+    csr.save("./certs", "my_test")?;
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .country_name("SE")
+        .state_province("Stockholm")
+        .organization("my org")
+        .locality_time("Stockholm")
+        .is_ca(true)
+        .key_type(KeyType::P521)
+        .signature_alg(HashAlg::SHA512)
+        .alternative_names(vec!["ca.com", "www.ca.com"])
+        .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
+    let root_cert = ca.build_and_self_sign()?;
+    let new_cert_from_csr = csr.build_signed_certificate(&root_cert, "2026-07-10")?;
+    new_cert_from_csr.save("./certs", "new_cert_from_csr")?;
+
     Ok(())
 }

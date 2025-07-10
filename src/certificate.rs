@@ -8,17 +8,20 @@ use openssl::nid::Nid;
 use openssl::pkey::{PKey, Private};
 use openssl::rsa::Rsa;
 use openssl::stack::Stack;
+use openssl::x509::X509Req;
 use openssl::x509::extension::{
     BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
 };
 use openssl::x509::{
-    X509, X509Builder, X509NameBuilder, X509StoreContext, store::X509StoreBuilder,
+    X509, X509Builder, X509NameBuilder, X509ReqBuilder, X509StoreContext, store::X509StoreBuilder,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::Path;
+use x509_parser::prelude::FromDer;
 
+use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
 
@@ -58,19 +61,43 @@ pub enum Usage {
     signature,
     contentcommitment,
 }
-/// Holds the generated certificate and private key
-pub struct Certificate {
-    pub x509: X509,
-    pub pkey: PKey<Private>,
+
+/// Common functionality for extracting PEM-encoded data and private keys from X509-related types
+pub trait X509Parts {
+    fn get_pem(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
+    fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
+    fn pem_extension(&self) -> &'static str;
 }
 
-impl Certificate {
-    /// Will save the certificate and private key to pem file
+/// Provides a method to save the private key and X509 certificate or CSR data to files.
+pub trait X509Common {
+    fn save<P: AsRef<Path>, F: AsRef<Path>>(
+        &self,
+        path: P,
+        filename: F,
+    ) -> Result<(), Box<dyn std::error::Error>>;
+}
+
+/// Implements `X509Common` for all types that implement `X509Parts`.
+///
+/// # Example
+/// ```no_run
+/// use cert_helper::certificate::{Certificate, X509Common};
+/// let cert = Certificate::load_cert_and_key("cert.pem", "key.pem").expect("Failed to generate certificate");
+/// cert.save("output", "mycert");
+/// ```
+impl<T: X509Parts> X509Common for T {
+    /// Will save the cert/csr  and private key to pem file
     /// if path = /path/foo/bar and filename = mytest
-    /// the certificate will be saved as: /path/foo/bar/mytest_cert.pem
-    /// the private key will be saved as: /path/foo/bar/mytest_pkey.pem
+    /// For example with certificate it will be:
+    /// /path/foo/bar/mytest_cert.pem
+    /// /path/foo/bar/mytest_pkey.pem
+    /// and for certificate signing request:
+    /// /path/foo/bar/mytest_csr.pem
+    /// /path/foo/bar/mytest_pkey.pem
+    ///
     /// If the path do not exist it will be created
-    pub fn save<P: AsRef<Path>, F: AsRef<Path>>(
+    fn save<P: AsRef<Path>, F: AsRef<Path>>(
         &self,
         path: P,
         filename: F,
@@ -90,13 +117,167 @@ impl Certificate {
             file.write_all(content)?;
             Ok(())
         };
-
-        write_file("_pkey.pem", &self.pkey.private_key_to_pem_pkcs8()?)?;
-        write_file("_cert.pem", &self.x509.to_pem()?)?;
-
+        match self.get_private_key() {
+            Ok(ref key) => write_file("_pkey.pem", key)?,
+            Err(_) => {}
+        }
+        write_file(&self.pem_extension(), &self.get_pem()?)?;
         Ok(())
     }
+}
+/// Holds the generated certificate signing request and private key
+pub struct Csr {
+    pub csr: X509Req,
+    pub pkey: Option<PKey<Private>>,
+}
 
+impl X509Parts for Csr {
+    fn get_pem(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(self.csr.to_pem()?)
+    }
+
+    fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        match self.pkey {
+            Some(ref pkey) => Ok(pkey.private_key_to_pem_pkcs8()?),
+            _ => Err("No private key found".into()),
+        }
+    }
+    fn pem_extension(&self) -> &'static str {
+        "_csr.pem"
+    }
+}
+impl Csr {
+    /// Read a certificate signing request from file
+    pub fn load_csr<C: AsRef<Path>>(csr_pem_file: C) -> Result<Self, Box<dyn std::error::Error>> {
+        let cert_pem = std::fs::read(csr_pem_file)?;
+        let cs_req = X509Req::from_pem(&cert_pem)?;
+        Ok(Self {
+            csr: cs_req,
+            pkey: None,
+        })
+    }
+    /// Create a signed certificate from a certificate signing request(csr)
+    pub fn build_signed_certificate(
+        &self,
+        signer: &Certificate,
+        valid_to: &str,
+    ) -> Result<Certificate, Box<dyn std::error::Error>> {
+        let can_sign = can_sign_cert(&signer.x509)?;
+        if !can_sign {
+            let err = format!(
+                "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:{:?}",
+                signer.x509.issuer_name()
+            );
+            return Err(err.into());
+        }
+        let mut builder = X509Builder::new()?;
+        builder.set_version(2)?;
+        builder.set_subject_name(self.csr.subject_name())?;
+        builder.set_issuer_name(signer.x509.subject_name())?;
+        let csr_public_key = self.csr.public_key()?;
+        builder.set_pubkey(&csr_public_key)?;
+
+        let der = self.csr.to_der()?;
+        let parsed_csr = X509CertificationRequest::from_der(&der)?;
+
+        let req_ext = parsed_csr.1.requested_extensions();
+        if let Some(exts) = req_ext {
+            for ext in exts {
+                match ext {
+                    ParsedExtension::KeyUsage(ku) => {
+                        let mut usage = openssl::x509::extension::KeyUsage::new();
+                        if ku.digital_signature() {
+                            usage.digital_signature();
+                        }
+                        if ku.key_encipherment() {
+                            usage.key_encipherment();
+                        }
+                        if ku.key_cert_sign() {
+                            usage.key_cert_sign();
+                        }
+                        if ku.non_repudiation() {
+                            usage.non_repudiation();
+                        }
+                        if ku.crl_sign() {
+                            usage.crl_sign();
+                        }
+
+                        builder.append_extension(usage.build()?)?;
+                    }
+                    ParsedExtension::ExtendedKeyUsage(eku) => {
+                        let mut ext = openssl::x509::extension::ExtendedKeyUsage::new();
+                        if eku.server_auth {
+                            ext.server_auth();
+                        }
+                        if eku.client_auth {
+                            ext.client_auth();
+                        }
+                        if eku.code_signing {
+                            ext.code_signing();
+                        }
+                        if eku.email_protection {
+                            ext.email_protection();
+                        }
+                        builder.append_extension(ext.build()?)?;
+                    }
+                    ParsedExtension::SubjectAlternativeName(san) => {
+                        let mut openssl_san =
+                            openssl::x509::extension::SubjectAlternativeName::new();
+                        for name in &san.general_names {
+                            if let x509_parser::extensions::GeneralName::DNSName(dns) = name {
+                                openssl_san.dns(dns);
+                            }
+                        }
+                        builder.append_extension(
+                            openssl_san.build(&builder.x509v3_context(None, None))?,
+                        )?;
+                    }
+                    _ => {
+                        println!("Unsupported extension: {:?}", ext);
+                    }
+                }
+            }
+        }
+        builder.set_not_before(Asn1Time::days_from_now(0)?.as_ref())?;
+        builder.set_not_after(create_asn1_time_from_date(valid_to)?.as_ref())?;
+        let serial_number = {
+            let mut serial = BigNum::new()?;
+            serial.rand(159, openssl::bn::MsbOption::MAYBE_ZERO, false)?;
+            serial.to_asn1_integer()?
+        };
+        builder.set_serial_number(&serial_number)?;
+        builder.sign(signer.pkey.as_ref().unwrap(), MessageDigest::sha256())?;
+        let cert = builder.build();
+
+        Ok(Certificate {
+            x509: cert,
+            pkey: None,
+        })
+    }
+}
+/// Holds the generated certificate and private key
+pub struct Certificate {
+    pub x509: X509,
+    pub pkey: Option<PKey<Private>>,
+}
+
+impl X509Parts for Certificate {
+    fn get_pem(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(self.x509.to_pem()?)
+    }
+
+    fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        match self.pkey {
+            Some(ref pkey) => Ok(pkey.private_key_to_pem_pkcs8()?),
+            _ => Err("No private key found".into()),
+        }
+    }
+    fn pem_extension(&self) -> &'static str {
+        "_cert.pem"
+    }
+}
+
+impl Certificate {
     /// Loads a certificate and private key that are in PEM format from file
     /// and creates an X509 and PKey object.
     pub fn load_cert_and_key<C: AsRef<Path>, K: AsRef<Path>>(
@@ -107,11 +288,30 @@ impl Certificate {
         let key_pem = std::fs::read(key_pem_file)?;
         let cert = X509::from_pem(&cert_pem)?;
         let pkey = PKey::private_key_from_pem(&key_pem)?;
-        Ok(Self { x509: cert, pkey })
+        Ok(Self {
+            x509: cert,
+            pkey: Some(pkey),
+        })
     }
 }
-/// Builder for creating a new certificate and private key
-pub struct CertBuilder {
+
+/// Defines a common interface for setting X509 certificate or CSR builder fields.
+pub trait BuilderCommon {
+    fn set_common_name(&mut self, name: &str);
+    fn set_signer(&mut self, signer: &str);
+    fn set_country_name(&mut self, name: &str);
+    fn set_state_province(&mut self, name: &str);
+    fn set_organization(&mut self, name: &str);
+    fn set_alternative_names(&mut self, alternative_names: Vec<&str>);
+    fn set_locality_time(&mut self, locality_time: &str);
+    fn set_key_type(&mut self, key_type: KeyType);
+    fn set_signature_alg(&mut self, signature_alg: HashAlg);
+    fn set_is_ca(&mut self, ca: bool);
+    fn set_key_usage(&mut self, key_usage: HashSet<Usage>);
+}
+
+/// Stores common configurable fields used during X509 certificate or CSR generation.
+pub struct BuilderFields {
     common_name: String,
     signer: Option<String>, //place holder for maybe future use??
     alternative_names: HashSet<String>,
@@ -122,15 +322,66 @@ pub struct CertBuilder {
     key_type: Option<KeyType>,
     signature_alg: Option<HashAlg>,
     ca: bool,
-    valid_from: Asn1Time,
-    valid_to: Asn1Time,
     usage: Option<HashSet<Usage>>,
 }
+impl BuilderCommon for BuilderFields {
+    // Sets the common name, CN. This value will also be added to alternaitve_names
+    fn set_common_name(&mut self, common_name: &str) {
+        self.common_name = common_name.into();
+        self.alternative_names.insert(String::from(common_name));
+    }
+    // A list of altrnative names(SAN) the Common Name(CN) is always included
+    fn set_alternative_names(&mut self, alternative_names: Vec<&str>) {
+        self.alternative_names
+            .extend(vec_str_to_hs!(alternative_names));
+    }
+    // maybe
+    fn set_signer(&mut self, signer: &str) {
+        self.signer = Some(signer.into());
+    }
+    // Country, a valid two char value
+    fn set_country_name(&mut self, country_name: &str) {
+        self.country_name = country_name.into();
+    }
+    // State, province an utf-8 value
+    fn set_state_province(&mut self, state_province: &str) {
+        self.state_province = state_province.into();
+    }
+    // Org. an utf-8 value
+    fn set_organization(&mut self, organization: &str) {
+        self.organization = organization.into();
+    }
+    // Locality, represents the city, town, or locality of the certificate subject
+    fn set_locality_time(&mut self, locality_time: &str) {
+        self.locality_time = locality_time.into();
+    }
+    // Selects what type of key to use RSA or elliptic
+    fn set_key_type(&mut self, key_type: KeyType) {
+        self.key_type = Some(key_type);
+    }
+    // Selects what alg to use for signature
+    fn set_signature_alg(&mut self, signature_alg: HashAlg) {
+        self.signature_alg = Some(signature_alg);
+    }
+    // if this certificate be a Certificate Authority (CN)
+    fn set_is_ca(&mut self, ca: bool) {
+        self.ca = ca;
+    }
+    // Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
+    fn set_key_usage(&mut self, key_usage: HashSet<Usage>) {
+        match &mut self.usage {
+            Some(existing_usage) => {
+                existing_usage.extend(key_usage);
+            }
+            None => {
+                self.usage = Some(key_usage);
+            }
+        };
+    }
+}
 
-impl Default for CertBuilder {
-    /// Returns default values for all fields, except valid_from,
-    /// which is set to the current time, and valid_to, which is
-    /// set to one year from now.
+impl Default for BuilderFields {
+    /// Returns default values for all fields
     fn default() -> Self {
         Self {
             common_name: Default::default(),
@@ -143,67 +394,90 @@ impl Default for CertBuilder {
             key_type: Default::default(),
             signature_alg: Default::default(),
             ca: false,
-            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
-            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
             usage: Default::default(),
         }
+    }
+}
+/// Provides a builder interface for configuring X509 certificate or CSR fields.
+pub trait UseesBuilderFields: Sized {
+    fn fields_mut(&mut self) -> &mut BuilderFields;
+
+    /// Sets the common name, CN. This value will also be added to alternaitve_names
+    fn common_name(mut self, common_name: &str) -> Self {
+        self.fields_mut().set_common_name(common_name);
+        self
+    }
+    fn signer(mut self, signer: &str) -> Self {
+        self.fields_mut().set_signer(signer);
+        self
+    }
+    /// A list of altrnative names(SAN) the Common Name(CN) is always included
+    fn alternative_names(mut self, alternative_names: Vec<&str>) -> Self {
+        self.fields_mut().set_alternative_names(alternative_names);
+        self
+    }
+    /// Country, a valid two char value
+    fn country_name(mut self, country_name: &str) -> Self {
+        self.fields_mut().set_country_name(country_name);
+        self
+    }
+    /// State, province an utf-8 value
+    fn state_province(mut self, state_province: &str) -> Self {
+        self.fields_mut().set_state_province(state_province);
+        self
+    }
+    /// Org. an utf-8 value
+    fn organization(mut self, organization: &str) -> Self {
+        self.fields_mut().set_organization(organization);
+        self
+    }
+    /// Locality, represents the city, town, or locality of the certificate subject
+    fn locality_time(mut self, locality_time: &str) -> Self {
+        self.fields_mut().set_locality_time(locality_time);
+        self
+    }
+    /// Selects what type of key to use RSA or elliptic
+    fn key_type(mut self, key_type: KeyType) -> Self {
+        self.fields_mut().set_key_type(key_type);
+        self
+    }
+    /// Selects what alg to use for signature
+    fn signature_alg(mut self, signature_alg: HashAlg) -> Self {
+        self.fields_mut().set_signature_alg(signature_alg);
+        self
+    }
+    /// if this certificate be a Certificate Authority (CN)
+    fn is_ca(mut self, ca: bool) -> Self {
+        self.fields_mut().set_is_ca(ca);
+        self
+    }
+
+    /// Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
+    fn key_usage(mut self, key_usage: HashSet<Usage>) -> Self {
+        self.fields_mut().set_key_usage(key_usage);
+        self
+    }
+}
+
+/// Builder for creating a new certificate and private key
+pub struct CertBuilder {
+    fields: BuilderFields,
+    valid_from: Asn1Time,
+    valid_to: Asn1Time,
+}
+impl UseesBuilderFields for CertBuilder {
+    fn fields_mut(&mut self) -> &mut BuilderFields {
+        &mut self.fields
     }
 }
 impl CertBuilder {
     /// Create a new CertBuilder with defaults and one year from now as valid date
     pub fn new() -> Self {
-        Self::default()
-    }
-    /// Sets the common name, CN. This value will also be added to alternaitve_names
-    pub fn common_name(mut self, common_name: &str) -> Self {
-        self.common_name = common_name.into();
-        self.alternative_names.insert(String::from(common_name));
-        self
-    }
-    pub fn signer(mut self, signer: &str) -> Self {
-        self.signer = Some(signer.into());
-        self
-    }
-    /// A list of altrnative names(SAN) the Common Name(CN) is always included
-    pub fn alternative_names(mut self, alternative_names: Vec<&str>) -> Self {
-        self.alternative_names
-            .extend(vec_str_to_hs!(alternative_names));
-        self
-    }
-    /// Country, a valid two char value
-    pub fn country_name(mut self, country_name: &str) -> Self {
-        self.country_name = country_name.into();
-        self
-    }
-    /// State, province an utf-8 value
-    pub fn state_province(mut self, state_province: &str) -> Self {
-        self.state_province = state_province.into();
-        self
-    }
-    /// Org. an utf-8 value
-    pub fn organization(mut self, organization: &str) -> Self {
-        self.organization = organization.into();
-        self
-    }
-    /// Locality, represents the city, town, or locality of the certificate subject
-    pub fn locality_time(mut self, locality_time: &str) -> Self {
-        self.locality_time = locality_time.into();
-        self
-    }
-    /// Selects what type of key to use RSA or elliptic
-    pub fn key_type(mut self, key_type: KeyType) -> Self {
-        self.key_type = Some(key_type);
-        self
-    }
-    /// Selects what alg to use for signature
-    pub fn signature_alg(mut self, signature_alg: HashAlg) -> Self {
-        self.signature_alg = Some(signature_alg);
-        self
-    }
-    /// if this certificate be a Certificate Authority (CN)
-    pub fn is_ca(mut self, ca: bool) -> Self {
-        self.ca = ca;
-        self
+        Self {
+            fields: BuilderFields::default(),
+            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
+            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
+        }
     }
     /// start date that the certificate should be valid yyyy-mm-dd
     pub fn valid_from(mut self, valid_from: &str) -> Self {
@@ -217,27 +491,16 @@ impl CertBuilder {
             create_asn1_time_from_date(valid_to).expect("Failed to parse valid_to date");
         self
     }
-    /// Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
-    pub fn key_usage(mut self, key_usage: HashSet<Usage>) -> Self {
-        match &mut self.usage {
-            Some(existing_usage) => {
-                existing_usage.extend(key_usage);
-            }
-            None => {
-                self.usage = Some(key_usage);
-            }
-        };
-        self
-    }
+
     /// create a self signed x509 certificate and private key
     pub fn build_and_self_sign(&self) -> Result<Certificate, Box<dyn std::error::Error>> {
         let (mut builder, pkey) = self.prepare_x509_builder(None)?;
-        builder.sign(&pkey, select_hash(&self.signature_alg))?;
+        builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
         let ca_cert = builder.build();
 
         Ok(Certificate {
             x509: ca_cert,
-            pkey: pkey,
+            pkey: Some(pkey),
         })
     }
     /// Create a signed certificate and private key
@@ -254,9 +517,13 @@ impl CertBuilder {
             return Err(err.into());
         }
         let (mut builder, pkey) = self.prepare_x509_builder(Some(&signer))?;
-        builder.sign(&signer.pkey, select_hash(&self.signature_alg))?;
+        let signer_key = signer.pkey.as_ref().unwrap();
+        builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
         let cert = builder.build();
-        Ok(Certificate { x509: cert, pkey })
+        Ok(Certificate {
+            x509: cert,
+            pkey: Some(pkey),
+        })
     }
 
     fn prepare_x509_builder(
@@ -264,18 +531,19 @@ impl CertBuilder {
         signer: Option<&Certificate>,
     ) -> Result<(X509Builder, PKey<Private>), Box<dyn std::error::Error>> {
         let mut name_builder = X509NameBuilder::new()?;
-        name_builder.append_entry_by_nid(Nid::COMMONNAME, &self.common_name)?;
-        if !self.country_name.trim().is_empty() {
-            name_builder.append_entry_by_nid(Nid::COUNTRYNAME, &self.country_name)?;
+        name_builder.append_entry_by_nid(Nid::COMMONNAME, &self.fields.common_name)?;
+        if !self.fields.country_name.trim().is_empty() {
+            name_builder.append_entry_by_nid(Nid::COUNTRYNAME, &self.fields.country_name)?;
         }
-        if !self.state_province.trim().is_empty() {
-            name_builder.append_entry_by_nid(Nid::STATEORPROVINCENAME, &self.state_province)?;
+        if !self.fields.state_province.trim().is_empty() {
+            name_builder
+                .append_entry_by_nid(Nid::STATEORPROVINCENAME, &self.fields.state_province)?;
         }
-        if !self.locality_time.trim().is_empty() {
-            name_builder.append_entry_by_nid(Nid::LOCALITYNAME, &self.locality_time)?;
+        if !self.fields.locality_time.trim().is_empty() {
+            name_builder.append_entry_by_nid(Nid::LOCALITYNAME, &self.fields.locality_time)?;
         }
-        if !self.organization.trim().is_empty() {
-            name_builder.append_entry_by_nid(Nid::ORGANIZATIONNAME, &self.organization)?;
+        if !self.fields.organization.trim().is_empty() {
+            name_builder.append_entry_by_nid(Nid::ORGANIZATIONNAME, &self.fields.organization)?;
         }
         let name = name_builder.build();
 
@@ -288,7 +556,7 @@ impl CertBuilder {
             serial.to_asn1_integer()?
         };
 
-        let pkey = select_key(&self.key_type).unwrap();
+        let pkey = select_key(&self.fields.key_type).unwrap();
         builder.set_serial_number(&serial_number)?;
         builder.set_subject_name(&name)?;
         builder.set_pubkey(&pkey)?;
@@ -299,8 +567,8 @@ impl CertBuilder {
             None => builder.set_issuer_name(&name)?,
         }
 
-        let mut key_usage = self.usage.clone().unwrap_or_default();
-        if self.ca {
+        let mut key_usage = self.fields.usage.clone().unwrap_or_default();
+        if self.fields.ca {
             key_usage.insert(Usage::certsign);
             key_usage.insert(Usage::crlsign);
             builder.append_extension(BasicConstraints::new().ca().build()?)?;
@@ -317,7 +585,7 @@ impl CertBuilder {
         }
 
         let mut san = SubjectAlternativeName::new();
-        for s in &self.alternative_names {
+        for s in &self.fields.alternative_names {
             san.dns(s);
         }
         if let Some(signer_cert) = signer {
@@ -331,6 +599,70 @@ impl CertBuilder {
     }
 }
 
+/// Builder for creating a new certificate signing request and private key
+pub struct CsrBuilder {
+    fields: BuilderFields,
+}
+impl UseesBuilderFields for CsrBuilder {
+    fn fields_mut(&mut self) -> &mut BuilderFields {
+        &mut self.fields
+    }
+}
+impl CsrBuilder {
+    /// Create a new CsrBuilder with defaults
+    pub fn new() -> Self {
+        Self {
+            fields: BuilderFields::default(),
+        }
+    }
+    pub fn certificate_signing_request(self) -> Result<Csr, Box<dyn std::error::Error>> {
+        let mut name_builder = X509NameBuilder::new()?;
+        name_builder.append_entry_by_nid(Nid::COMMONNAME, &self.fields.common_name)?;
+        if !self.fields.country_name.trim().is_empty() {
+            name_builder.append_entry_by_nid(Nid::COUNTRYNAME, &self.fields.country_name)?;
+        }
+        if !self.fields.state_province.trim().is_empty() {
+            name_builder
+                .append_entry_by_nid(Nid::STATEORPROVINCENAME, &self.fields.state_province)?;
+        }
+        if !self.fields.locality_time.trim().is_empty() {
+            name_builder.append_entry_by_nid(Nid::LOCALITYNAME, &self.fields.locality_time)?;
+        }
+        if !self.fields.organization.trim().is_empty() {
+            name_builder.append_entry_by_nid(Nid::ORGANIZATIONNAME, &self.fields.organization)?;
+        }
+        let name = name_builder.build();
+        let mut builder = X509ReqBuilder::new()?;
+        builder.set_version(0)?;
+        builder.set_subject_name(&name)?;
+        let pkey = select_key(&self.fields.key_type).unwrap();
+        builder.set_pubkey(&pkey)?;
+        let key_usage = self.fields.usage.clone().unwrap_or_default();
+
+        let mut extensions = Stack::new()?;
+
+        let (tracked_key_usage, tracked_extended_key_usage) = get_key_usage(&Some(key_usage));
+        if tracked_key_usage.is_used() {
+            extensions.push(tracked_key_usage.inner.build()?)?;
+        }
+        if tracked_extended_key_usage.is_used() {
+            extensions.push(tracked_extended_key_usage.inner.build()?)?;
+        }
+
+        let mut san = SubjectAlternativeName::new();
+        for s in &self.fields.alternative_names {
+            san.dns(s);
+        }
+        extensions.push(san.build(&builder.x509v3_context(None))?)?;
+        builder.add_extensions(&extensions)?;
+        builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
+        let csr = builder.build();
+        Ok(Csr {
+            csr,
+            pkey: Some(pkey),
+        })
+    }
+}
 struct TrackedExtendedKeyUsage {
     inner: ExtendedKeyUsage,
     used: bool,
@@ -663,5 +995,30 @@ IQ==
             "Failed to load cert and key: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_reading_csr_from_file() {
+        let csr_data = b"-----BEGIN CERTIFICATE REQUEST-----
+MIICzDCCAbQCAQAwXTEVMBMGA1UEAwwMZXhhbXBsZTIuY29tMQswCQYDVQQGEwJT
+RTESMBAGA1UECAwJU3RvY2tob2xtMRIwEAYDVQQHDAlTdG9ja2hvbG0xDzANBgNV
+BAoMBk15IG9yZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAIeAXpCG
+hbIayESfdTzOO0DxIMsOAu4kUm0zF0W/+xDUHl6bGy3wlB9S9nzBG/qwqFZ27Om3
+o4zrZ8K8DBx0ERWNuhMmr0Nx8QpAWBEyxOc08Gn4c3XVBBkRZSn4AIqr9DGtcUqW
+tQZXvMGF6sRRljiEvOxO6zMzZKTGYwzIeQvH85cQ3uXsw0Kknsw/fcuywaAC8SS9
+aqs4jiEIgzdhxdH2OVXBNGj4cjVhK309JiWFHS9XJLNV/PKC+F1nkaANQwbW5A4F
+9vya4js9gk8f4SfF1u+qOJEvsDvAb+1xdjXPRzf77eGh3rC4KgGWQ6WrWfW8PItF
+BDg/jskq3bJXNL8CAwEAAaAqMCgGCSqGSIb3DQEJDjEbMBkwFwYDVR0RBBAwDoIM
+ZXhhbXBsZTIuY29tMA0GCSqGSIb3DQEBCwUAA4IBAQAHeeSW8C6SMVhWiMvPn7iz
+FUHQedHRyPz6kTEfC01eNIbs0r4YghOAcm8PF67jncIXVrqgxo1uzq12qlV+0YYb
+jps31IbQNOz0eFLYvij15ielmOYeQZZ/2vqaGi3geVobLc6Ki5tadnA/NhjTN33j
+QcqDDic8riAOTbSQ6TH9KPTGJQOPk+taMpDGDHskIW0oME5iT2ewbhBHg6v/kSzy
+tss2kBY5O7vo2COtbNcwX5Xp9S2LH9kVUKr0GIjuQjwbv5xl+GNdDey09W9EDACU
+jcGV3++2wS4LN4h3CG4pWZ+LTXhm8ymhoWOapN95lfe3xLRAKFJwiLkGwS75++FW
+-----END CERTIFICATE REQUEST-----";
+        let mut csr_file = NamedTempFile::new().expect("Failed to create temp csr file");
+        csr_file.write_all(csr_data).expect("Failed to write csr");
+        let result = Csr::load_csr(csr_file.path());
+        assert!(result.is_ok(), "Failed to load csr: {:?}", result.err());
     }
 }
