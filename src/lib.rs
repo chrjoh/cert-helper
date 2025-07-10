@@ -49,7 +49,7 @@
 //!```
 //! ## Basic Example creating a certificate signing request and private key
 //! ```rust
-//! use cert_helper::certificate::{HashAlg, KeyType, Usage, Csr, verify_cert, UseesBuilderFields,CsrBuilder};
+//! use cert_helper::certificate::{Usage, Csr, verify_cert, UseesBuilderFields,CsrBuilder};
 //!
 //! // create a certificate signing request and private key
 //! let csr_builder = CsrBuilder::new()
@@ -77,7 +77,7 @@
 //!```
 //! ## Basic Example creating a signed certificate from a signing request
 //! ```rust
-//! use cert_helper::certificate::{CertBuilder, HashAlg, KeyType, Usage, Csr, verify_cert, UseesBuilderFields,CsrBuilder};
+//! use cert_helper::certificate::{CertBuilder, Csr, verify_cert, UseesBuilderFields, CsrBuilder};
 //!
 //! let ca = CertBuilder::new().common_name("My Test Ca").is_ca(true);
 //! let root_cert = ca.build_and_self_sign().expect("failed to create root certificate");
@@ -88,6 +88,25 @@
 //! let cert = csr.build_signed_certificate(&root_cert,"2045-01-01");
 //! assert!(cert.is_ok());
 //! ```
+//!
+//! ## Basic Example creating a chain of signed certificates and verify the chain
+//! ```rust
+//! use cert_helper::certificate::{CertBuilder, verify_cert, UseesBuilderFields};
+//!
+//! let cert = CertBuilder::new().common_name("Cert-1").is_ca(true);
+//! let cert_1 = cert.build_and_self_sign().expect("Failed to create certificate");
+//! let cert = CertBuilder::new().common_name("Cert-2").is_ca(true);
+//! let cert_2 = cert.build_and_sign(&cert_1).expect("Failed to create certificate");
+//! let cert = CertBuilder::new().common_name("Cert-3");
+//! let cert_3 = cert.build_and_sign(&cert_2).expect("Failed to create certificate");
+//!
+//! match verify_cert(&cert_3.x509, &cert_1.x509, vec![&cert_2.x509]) {
+//!    Ok(true) => println!("verify ok"),
+//!    _ => println!("failed verify"),
+//! }
+//!
+//! ```
+//!
 //! ## Config
 //!
 //! Values that can be selected for building a certificate
@@ -101,7 +120,7 @@
 //! | state_province | some name | string: test |
 //! | locality_time | Stockholm | string: Stockholm |
 //! | alternative_names | list of alternative DNS names this certificate is valid for | string: valid dns names |
-//! | signature_alg | which algorithm to be used for signature, default is SHA256 | senum: SHA1, SHA256, SHA384, SHA512 |
+//! | signature_alg | which algorithm to be used for signature, default is SHA256 | enum: SHA1, SHA256, SHA384, SHA512 |
 //! | valid_from | Start date then the certificate is valid, default is now | string: 2010-01-01 |
 //! | valid_to | End date then the certificate is not valid, default is 1 year | string: 2020-01-01 |
 //! | usage | Key usage to add to the certificates, see list below for options | list of enums, defined in Key Usage table |
