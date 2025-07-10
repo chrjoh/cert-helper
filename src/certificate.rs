@@ -8,11 +8,12 @@ use openssl::nid::Nid;
 use openssl::pkey::{PKey, Private};
 use openssl::rsa::Rsa;
 use openssl::stack::Stack;
+use openssl::x509::X509Req;
 use openssl::x509::extension::{
     BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
 };
 use openssl::x509::{
-    X509, X509Builder, X509NameBuilder, X509StoreContext, store::X509StoreBuilder,
+    X509, X509Builder, X509NameBuilder, X509ReqBuilder, X509StoreContext, store::X509StoreBuilder,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, create_dir_all};
@@ -58,19 +59,32 @@ pub enum Usage {
     signature,
     contentcommitment,
 }
-/// Holds the generated certificate and private key
-pub struct Certificate {
-    pub x509: X509,
-    pub pkey: PKey<Private>,
+pub trait X509Parts {
+    fn get_pem(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
+    fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
+    fn pem_extension(&self) -> &'static str;
 }
 
-impl Certificate {
-    /// Will save the certificate and private key to pem file
+pub trait X509Common {
+    fn save<P: AsRef<Path>, F: AsRef<Path>>(
+        &self,
+        path: P,
+        filename: F,
+    ) -> Result<(), Box<dyn std::error::Error>>;
+}
+
+impl<T: X509Parts> X509Common for T {
+    /// Will save the cert/csr  and private key to pem file
     /// if path = /path/foo/bar and filename = mytest
-    /// the certificate will be saved as: /path/foo/bar/mytest_cert.pem
-    /// the private key will be saved as: /path/foo/bar/mytest_pkey.pem
+    /// For example with certificate it will be:
+    /// /path/foo/bar/mytest_cert.pem
+    /// /path/foo/bar/mytest_pkey.pem
+    /// and for certificate signing request:
+    /// /path/foo/bar/mytest_csr.pem
+    /// /path/foo/bar/mytest_pkey.pem
+    ///
     /// If the path do not exist it will be created
-    pub fn save<P: AsRef<Path>, F: AsRef<Path>>(
+    fn save<P: AsRef<Path>, F: AsRef<Path>>(
         &self,
         path: P,
         filename: F,
@@ -91,12 +105,48 @@ impl Certificate {
             Ok(())
         };
 
-        write_file("_pkey.pem", &self.pkey.private_key_to_pem_pkcs8()?)?;
-        write_file("_cert.pem", &self.x509.to_pem()?)?;
+        write_file("_pkey.pem", &self.get_private_key()?)?;
+        write_file(&self.pem_extension(), &self.get_pem()?)?;
 
         Ok(())
     }
+}
+/// Holds the generated certificate signing request and private key
+pub struct Csr {
+    pub csr: X509Req,
+    pub pkey: PKey<Private>,
+}
+impl X509Parts for Csr {
+    fn get_pem(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(self.csr.to_pem()?)
+    }
 
+    fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(self.pkey.private_key_to_pem_pkcs8()?)
+    }
+    fn pem_extension(&self) -> &'static str {
+        "_csr.pem"
+    }
+}
+/// Holds the generated certificate and private key
+pub struct Certificate {
+    pub x509: X509,
+    pub pkey: PKey<Private>,
+}
+
+impl X509Parts for Certificate {
+    fn get_pem(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(self.x509.to_pem()?)
+    }
+
+    fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(self.pkey.private_key_to_pem_pkcs8()?)
+    }
+    fn pem_extension(&self) -> &'static str {
+        "_cert.pem"
+    }
+}
+impl Certificate {
     /// Loads a certificate and private key that are in PEM format from file
     /// and creates an X509 and PKey object.
     pub fn load_cert_and_key<C: AsRef<Path>, K: AsRef<Path>>(
@@ -328,6 +378,49 @@ impl CertBuilder {
             builder.append_extension(san.build(&builder.x509v3_context(None, None))?)?;
         }
         Ok((builder, pkey))
+    }
+    pub fn certificate_signing_request(self) -> Result<Csr, Box<dyn std::error::Error>> {
+        let mut name_builder = X509NameBuilder::new()?;
+        name_builder.append_entry_by_nid(Nid::COMMONNAME, &self.common_name)?;
+        if !self.country_name.trim().is_empty() {
+            name_builder.append_entry_by_nid(Nid::COUNTRYNAME, &self.country_name)?;
+        }
+        if !self.state_province.trim().is_empty() {
+            name_builder.append_entry_by_nid(Nid::STATEORPROVINCENAME, &self.state_province)?;
+        }
+        if !self.locality_time.trim().is_empty() {
+            name_builder.append_entry_by_nid(Nid::LOCALITYNAME, &self.locality_time)?;
+        }
+        if !self.organization.trim().is_empty() {
+            name_builder.append_entry_by_nid(Nid::ORGANIZATIONNAME, &self.organization)?;
+        }
+        let name = name_builder.build();
+        let mut builder = X509ReqBuilder::new()?;
+        builder.set_version(0)?;
+        builder.set_subject_name(&name)?;
+        let pkey = select_key(&self.key_type).unwrap();
+        builder.set_pubkey(&pkey)?;
+        let key_usage = self.usage.clone().unwrap_or_default();
+
+        let mut extensions = Stack::new()?;
+
+        let (tracked_key_usage, tracked_extended_key_usage) = get_key_usage(&Some(key_usage));
+        if tracked_key_usage.is_used() {
+            extensions.push(tracked_key_usage.inner.build()?)?;
+        }
+        if tracked_extended_key_usage.is_used() {
+            extensions.push(tracked_extended_key_usage.inner.build()?)?;
+        }
+
+        let mut san = SubjectAlternativeName::new();
+        for s in &self.alternative_names {
+            san.dns(s);
+        }
+        extensions.push(san.build(&builder.x509v3_context(None))?)?;
+        builder.add_extensions(&extensions)?;
+        builder.sign(&pkey, select_hash(&self.signature_alg))?;
+        let csr = builder.build();
+        Ok(Csr { csr, pkey })
     }
 }
 

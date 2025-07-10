@@ -1,5 +1,8 @@
-use cert_helper::certificate::{CertBuilder, Certificate, HashAlg, KeyType, Usage, verify_cert};
+use cert_helper::certificate::{
+    CertBuilder, Certificate, HashAlg, KeyType, Usage, X509Common, verify_cert,
+};
 use std::fs;
+
 /// Create three certificates as a chain
 /// ca->middle->leaf
 /// saves the crtificates and private keys in the folder certs
@@ -62,5 +65,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(true) => println!("verify ok"),
         _ => println!("failed verify"),
     }
+
+    // csr
+    let csr_builder = CertBuilder::new()
+        .common_name("example2.com")
+        .country_name("SE")
+        .state_province("Stockholm")
+        .organization("My org")
+        .locality_time("Stockholm")
+        .alternative_names(vec!["example2.com", "www.example2.com"])
+        .key_usage(
+            [
+                Usage::contentcommitment,
+                Usage::encipherment,
+                Usage::serverauth,
+            ]
+            .into_iter()
+            .collect(),
+        );
+    let csr = csr_builder.certificate_signing_request()?;
+    csr.save("./certs", "my_test")?;
+
     Ok(())
 }
