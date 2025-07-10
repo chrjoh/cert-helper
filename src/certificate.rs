@@ -59,13 +59,15 @@ pub enum Usage {
     signature,
     contentcommitment,
 }
+
+/// Common functionality for extracting PEM-encoded data and private keys from X509-related types
 pub trait X509Parts {
     fn get_pem(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
     fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
     fn pem_extension(&self) -> &'static str;
 }
 
-/// Import trait to be able to save certificate or csr data
+/// Provides a method to save the private key and X509 certificate or CSR data to files.
 pub trait X509Common {
     fn save<P: AsRef<Path>, F: AsRef<Path>>(
         &self,
@@ -74,6 +76,14 @@ pub trait X509Common {
     ) -> Result<(), Box<dyn std::error::Error>>;
 }
 
+/// Implements `X509Common` for all types that implement `X509Parts`.
+///
+/// # Example
+/// ```no_run
+/// use cert_helper::certificate::{Certificate, X509Common};
+/// let cert = Certificate::load_cert_and_key("cert.pem", "key.pem").expect("Failed to generate certificate");
+/// cert.save("output", "mycert");
+/// ```
 impl<T: X509Parts> X509Common for T {
     /// Will save the cert/csr  and private key to pem file
     /// if path = /path/foo/bar and filename = mytest
@@ -164,6 +174,7 @@ impl Certificate {
     }
 }
 
+/// Defines a common interface for setting X509 certificate or CSR builder fields.
 pub trait BuilderCommon {
     fn set_common_name(&mut self, name: &str);
     fn set_signer(&mut self, signer: &str);
@@ -178,6 +189,7 @@ pub trait BuilderCommon {
     fn set_key_usage(&mut self, key_usage: HashSet<Usage>);
 }
 
+/// Stores common configurable fields used during X509 certificate or CSR generation.
 pub struct BuilderFields {
     common_name: String,
     signer: Option<String>, //place holder for maybe future use??
@@ -248,9 +260,7 @@ impl BuilderCommon for BuilderFields {
 }
 
 impl Default for BuilderFields {
-    /// Returns default values for all fields, except valid_from,
-    /// which is set to the current time, and valid_to, which is
-    /// set to one year from now.
+    /// Returns default values for all fields
     fn default() -> Self {
         Self {
             common_name: Default::default(),
@@ -267,6 +277,7 @@ impl Default for BuilderFields {
         }
     }
 }
+/// Provides a builder interface for configuring X509 certificate or CSR fields.
 pub trait UseesBuilderFields: Sized {
     fn fields_mut(&mut self) -> &mut BuilderFields;
 
@@ -347,13 +358,13 @@ impl CertBuilder {
             valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
         }
     }
-    // start date that the certificate should be valid yyyy-mm-dd
+    /// start date that the certificate should be valid yyyy-mm-dd
     pub fn valid_from(mut self, valid_from: &str) -> Self {
         self.valid_from =
             create_asn1_time_from_date(valid_from).expect("Failed to parse valid_from date");
         self
     }
-    // end date that the certificate should no longer be valid yyyy-mm-dd
+    /// end date that the certificate should no longer be valid yyyy-mm-dd
     pub fn valid_to(mut self, valid_to: &str) -> Self {
         self.valid_to =
             create_asn1_time_from_date(valid_to).expect("Failed to parse valid_to date");

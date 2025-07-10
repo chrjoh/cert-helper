@@ -1,11 +1,10 @@
-use std::collections::HashSet;
-
 use cert_helper::certificate::{
-    CertBuilder, HashAlg, KeyType, Usage, UseesBuilderFields, create_cert_chain_from_cert_list,
-    verify_cert,
+    CertBuilder, CsrBuilder, HashAlg, KeyType, Usage, UseesBuilderFields,
+    create_cert_chain_from_cert_list, verify_cert,
 };
 use openssl::nid::Nid;
 use openssl::x509::X509;
+use std::collections::HashSet;
 
 #[test]
 fn create_minimal_self_signed_cert() -> Result<(), Box<dyn std::error::Error>> {
@@ -239,6 +238,32 @@ fn sort_list_of_certificates_in_signing_order() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+#[test]
+fn create_a_certificate_signing_request() -> Result<(), Box<dyn std::error::Error>> {
+    let csr_builder = CsrBuilder::new()
+        .common_name("example2.com")
+        .country_name("SE")
+        .state_province("Stockholm")
+        .organization("My org")
+        .locality_time("Stockholm")
+        .alternative_names(vec!["example2.com", "www.example2.com"])
+        .key_usage(
+            [
+                Usage::contentcommitment,
+                Usage::encipherment,
+                Usage::serverauth,
+            ]
+            .into_iter()
+            .collect(),
+        );
+    let csr = csr_builder.certificate_signing_request()?;
+    let subject_name = csr.csr.subject_name();
+    let mut cn = subject_name.entries_by_nid(Nid::COMMONNAME);
+    let name = cn.next().unwrap().data().as_utf8().unwrap().to_string();
+    assert_eq!(name, "example2.com");
+    Ok(())
+}
+
 fn get_clean_subject_name(x509: &X509) -> Option<String> {
     let subject_name = x509.subject_name();
     if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next() {
@@ -248,6 +273,7 @@ fn get_clean_subject_name(x509: &X509) -> Option<String> {
     }
     None
 }
+
 /// Note: only used for simple check in test not valid in
 /// real senarios as we scan the text version of the certificate and the user
 /// can supply these fields in for example organization.
