@@ -264,6 +264,25 @@ fn create_a_certificate_signing_request() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+#[test]
+fn create_signed_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>> {
+    let ca = CertBuilder::new().common_name("My Test Ca").is_ca(true);
+    let root_cert = ca.build_and_self_sign()?;
+    let csr_builder = CsrBuilder::new().common_name("example2.com");
+    let csr = csr_builder.certificate_signing_request()?;
+    let cert = csr.build_signed_certificate(&root_cert, 365)?;
+
+    assert_eq!(
+        get_clean_subject_name(&cert.x509),
+        Some("example2.com".into())
+    );
+    assert_eq!(
+        cert.x509.issuer_name().to_der().unwrap(),
+        root_cert.x509.subject_name().to_der().unwrap()
+    );
+    Ok(())
+}
+
 fn get_clean_subject_name(x509: &X509) -> Option<String> {
     let subject_name = x509.subject_name();
     if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next() {

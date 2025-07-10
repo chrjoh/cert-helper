@@ -148,9 +148,16 @@ impl X509Parts for Csr {
     }
 }
 impl Csr {
+    /// read a certificate signing request from file
+    pub fn load_csr<C: AsRef<Path>>(csr_pem_file: C) -> Result<Self, Box<dyn std::error::Error>> {
+        let cert_pem = std::fs::read(csr_pem_file)?;
+        let cs_req = X509Req::from_pem(&cert_pem)?;
+        Ok(Self {
+            csr: cs_req,
+            pkey: None,
+        })
+    }
     /// Create a signed certificate from a certificate signing request(csr)
-    /// TODO: check key usage fields not empty befor adding
-    /// TODO: add read csr from file
     pub fn build_signed_certificate(
         &self,
         signer: &Certificate,
@@ -981,5 +988,30 @@ IQ==
             "Failed to load cert and key: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_reading_csr_from_file() {
+        let csr_data = b"-----BEGIN CERTIFICATE REQUEST-----
+MIICzDCCAbQCAQAwXTEVMBMGA1UEAwwMZXhhbXBsZTIuY29tMQswCQYDVQQGEwJT
+RTESMBAGA1UECAwJU3RvY2tob2xtMRIwEAYDVQQHDAlTdG9ja2hvbG0xDzANBgNV
+BAoMBk15IG9yZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAIeAXpCG
+hbIayESfdTzOO0DxIMsOAu4kUm0zF0W/+xDUHl6bGy3wlB9S9nzBG/qwqFZ27Om3
+o4zrZ8K8DBx0ERWNuhMmr0Nx8QpAWBEyxOc08Gn4c3XVBBkRZSn4AIqr9DGtcUqW
+tQZXvMGF6sRRljiEvOxO6zMzZKTGYwzIeQvH85cQ3uXsw0Kknsw/fcuywaAC8SS9
+aqs4jiEIgzdhxdH2OVXBNGj4cjVhK309JiWFHS9XJLNV/PKC+F1nkaANQwbW5A4F
+9vya4js9gk8f4SfF1u+qOJEvsDvAb+1xdjXPRzf77eGh3rC4KgGWQ6WrWfW8PItF
+BDg/jskq3bJXNL8CAwEAAaAqMCgGCSqGSIb3DQEJDjEbMBkwFwYDVR0RBBAwDoIM
+ZXhhbXBsZTIuY29tMA0GCSqGSIb3DQEBCwUAA4IBAQAHeeSW8C6SMVhWiMvPn7iz
+FUHQedHRyPz6kTEfC01eNIbs0r4YghOAcm8PF67jncIXVrqgxo1uzq12qlV+0YYb
+jps31IbQNOz0eFLYvij15ielmOYeQZZ/2vqaGi3geVobLc6Ki5tadnA/NhjTN33j
+QcqDDic8riAOTbSQ6TH9KPTGJQOPk+taMpDGDHskIW0oME5iT2ewbhBHg6v/kSzy
+tss2kBY5O7vo2COtbNcwX5Xp9S2LH9kVUKr0GIjuQjwbv5xl+GNdDey09W9EDACU
+jcGV3++2wS4LN4h3CG4pWZ+LTXhm8ymhoWOapN95lfe3xLRAKFJwiLkGwS75++FW
+-----END CERTIFICATE REQUEST-----";
+        let mut csr_file = NamedTempFile::new().expect("Failed to create temp csr file");
+        csr_file.write_all(csr_data).expect("Failed to write csr");
+        let result = Csr::load_csr(csr_file.path());
+        assert!(result.is_ok(), "Failed to load csr: {:?}", result.err());
     }
 }
