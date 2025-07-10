@@ -85,7 +85,7 @@
 //! let csr_builder = CsrBuilder::new().common_name("example2.com");
 //! let csr = csr_builder.certificate_signing_request().expect("Failed to generate csr");
 //!
-//! let cert = csr.build_signed_certificate(&root_cert,365);
+//! let cert = csr.build_signed_certificate(&root_cert,"2045-01-01");
 //! assert!(cert.is_ok());
 //! ```
 //! ## Config

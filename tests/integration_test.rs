@@ -270,7 +270,7 @@ fn create_signed_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>
     let root_cert = ca.build_and_self_sign()?;
     let csr_builder = CsrBuilder::new().common_name("example2.com");
     let csr = csr_builder.certificate_signing_request()?;
-    let cert = csr.build_signed_certificate(&root_cert, 365)?;
+    let cert = csr.build_signed_certificate(&root_cert, "2045-01-01")?;
 
     assert_eq!(
         get_clean_subject_name(&cert.x509),

@@ -122,7 +122,6 @@ impl<T: X509Parts> X509Common for T {
             Err(_) => {}
         }
         write_file(&self.pem_extension(), &self.get_pem()?)?;
-
         Ok(())
     }
 }
@@ -161,8 +160,16 @@ impl Csr {
     pub fn build_signed_certificate(
         &self,
         signer: &Certificate,
-        days_valid: u32,
+        valid_to: &str,
     ) -> Result<Certificate, Box<dyn std::error::Error>> {
+        let can_sign = can_sign_cert(&signer.x509)?;
+        if !can_sign {
+            let err = format!(
+                "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:{:?}",
+                signer.x509.issuer_name()
+            );
+            return Err(err.into());
+        }
         let mut builder = X509Builder::new()?;
         builder.set_version(2)?;
         builder.set_subject_name(self.csr.subject_name())?;
@@ -232,7 +239,7 @@ impl Csr {
             }
         }
         builder.set_not_before(Asn1Time::days_from_now(0)?.as_ref())?;
-        builder.set_not_after(Asn1Time::days_from_now(days_valid)?.as_ref())?;
+        builder.set_not_after(create_asn1_time_from_date(valid_to)?.as_ref())?;
         let serial_number = {
             let mut serial = BigNum::new()?;
             serial.rand(159, openssl::bn::MsbOption::MAYBE_ZERO, false)?;
