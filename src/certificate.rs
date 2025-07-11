@@ -34,43 +34,83 @@ macro_rules! vec_str_to_hs {
 }
 /// Defines what type of key that can be used with the certificate
 pub enum KeyType {
+    /// RSA key with a 2048-bit length.
     RSA2048,
+    /// RSA key with a 4096-bit length.
     RSA4096,
+    /// Elliptic Curve key using the NIST P-224 curve (secp224r1).
     P224,
+    /// Elliptic Curve key using the NIST P-256 curve (secp256r1). Also known as prime256v1.
     P256,
+    /// Elliptic Curve key using the NIST P-384 curve (secp384r1).
     P384,
+    /// Elliptic Curve key using the NIST P-521 curve (secp521r1).
     P521,
 }
 /// Defines which hash algorithm to be used in certificate signing
 pub enum HashAlg {
+    /// SHA-1 (Secure Hash Algorithm 1), now considered weak and generally discouraged for new certificates.
     SHA1,
+    /// SHA-256 (part of SHA-2 family)
     SHA256,
+    /// SHA-384 (SHA-2 family), offers stronger security and is often used with larger key sizes.
     SHA384,
+    /// SHA-512 (SHA-2 family), provides the highest bit-length hash in the SHA-2 family.
     SHA512,
 }
-/// Which key usage and extended key usage values
-/// are applicable when creating a certificate
+/// Represents the allowed usages for a certificate, used in KeyUsage and ExtendedKeyUsage extensions.
 #[allow(non_camel_case_types)]
 #[derive(Hash, Eq, PartialEq, Debug, Clone)]
 pub enum Usage {
+    /// Allows the certificate to sign other certificates (typically used for CA certificates).
     certsign,
+    /// Allows the certificate to sign certificate revocation lists (CRLs).
     crlsign,
+    /// Allows the certificate to be used for encrypting data (e.g., key encipherment).
     encipherment,
+    /// Indicates the certificate can be used for client authentication in TLS.
     clientauth,
+    /// Indicates the certificate can be used for server authentication in TLS.
     serverauth,
+    /// Allows the certificate to be used for digital signatures.
     signature,
+    /// Indicates the certificate can be used for content commitment (non-repudiation).
     contentcommitment,
 }
 
 /// Common functionality for extracting PEM-encoded data and private keys from X509-related types
 pub trait X509Parts {
+    /// Returns the PEM-encoded representation of the X.509 object (e.g., certificate or CSR).
+    ///
+    /// # Returns
+    /// A `Vec<u8>` containing the PEM data, or an error if encoding fails.
     fn get_pem(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
+    /// Returns the PEM-encoded private key associated with the X.509 object.
+    ///
+    /// # Returns
+    /// A `Vec<u8>` containing the PEM-encoded private key, or an error if retrieval fails.
     fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
+    /// Returns the file extension typically used for the PEM output (e.g., `_cert.pem.`, `_csr.pem`, `_peky.pem`).
+    ///
+    /// # Returns
+    /// A static string slice representing the file extension.
     fn pem_extension(&self) -> &'static str;
 }
 
 /// Provides a method to save the private key and X509 certificate or CSR data to files.
 pub trait X509Common {
+    /// Saves the X.509 object (e.g., certificate, CSR, or private key) to a file.
+    ///
+    /// # Arguments
+    /// * `path` - The directory path where the file should be saved.
+    /// * `filename` - The name of the file (without extension).
+    ///
+    /// The file extension is typically determined by the object's type (e.g., `.crt`, `.csr`, `.key`)
+    /// and is provided by the [`X509Parts::pem_extension`] method if implemented.
+    ///
+    /// # Returns
+    /// * `Ok(())` if the file was successfully written.
+    /// * `Err` if an error occurred during file creation or writing.
     fn save<P: AsRef<Path>, F: AsRef<Path>>(
         &self,
         path: P,
@@ -125,9 +165,13 @@ impl<T: X509Parts> X509Common for T {
         Ok(())
     }
 }
-/// Holds the generated certificate signing request and private key
+/// Holds the generated Certificate Signing Request (CSR) and its associated private key.
 pub struct Csr {
+    /// The X.509 certificate signing request.
     pub csr: X509Req,
+    /// The private key used to generate the CSR.
+    ///
+    /// This is optional to allow flexibility in cases where the key is managed or stored separately.
     pub pkey: Option<PKey<Private>>,
 }
 
@@ -146,12 +190,17 @@ impl X509Parts for Csr {
         "_csr.pem"
     }
 }
+/// Holds configuration options for creating a certificate from a Certificate Signing Request (CSR).
 pub struct CsrOptions {
     valid_to: Asn1Time,
     valid_from: Asn1Time,
     ca: bool,
 }
 impl CsrOptions {
+    /// Creates a default `CsrOptions` instance:
+    /// - `valid_from` is set to today.
+    /// - `valid_to` is set to one year from today.
+    /// - `ca` is set to `false`.
     pub fn new() -> Self {
         Self {
             ca: false,
@@ -159,18 +208,31 @@ impl CsrOptions {
             valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
         }
     }
-    /// start date that the certificate should be valid yyyy-mm-dd
+
+    /// Sets the start date from which the certificate should be valid.
+    ///
+    /// # Arguments
+    /// * `valid_from` - A string in the format `yyyy-mm-dd`.
     pub fn valid_from(mut self, valid_from: &str) -> Self {
         self.valid_from =
             create_asn1_time_from_date(valid_from).expect("Failed to parse valid_from date");
         self
     }
-    /// end date that the certificate should no longer be valid yyyy-mm-dd
+
+    /// Sets the end date after which the certificate should no longer be valid.
+    ///
+    /// # Arguments
+    /// * `valid_to` - A string in the format `yyyy-mm-dd`.
     pub fn valid_to(mut self, valid_to: &str) -> Self {
         self.valid_to =
             create_asn1_time_from_date(valid_to).expect("Failed to parse valid_to date");
         self
     }
+
+    /// Specifies whether the certificate should be a Certificate Authority (CA).
+    ///
+    /// # Arguments
+    /// * `ca` - `true` if the certificate should be a CA, `false` otherwise.
     pub fn is_ca(mut self, ca: bool) -> Self {
         self.ca = ca;
         self
@@ -308,9 +370,13 @@ impl Csr {
         })
     }
 }
-/// Holds the generated certificate and private key
+/// Holds the generated X.509 certificate and its associated private key.
 pub struct Certificate {
+    /// The X.509 certificate.
     pub x509: X509,
+    /// The private key used to generate or sign the certificate.
+    ///
+    /// This is optional to allow for cases where the key is stored or managed separately.
     pub pkey: Option<PKey<Private>>,
 }
 
@@ -447,54 +513,62 @@ impl Default for BuilderFields {
 }
 /// Provides a builder interface for configuring X509 certificate or CSR fields.
 pub trait UseesBuilderFields: Sized {
+    /// Returns a mutable reference to the internal `BuilderFields` structure.
     fn fields_mut(&mut self) -> &mut BuilderFields;
 
-    /// Sets the common name, CN. This value will also be added to alternaitve_names
+    /// Sets the Common Name (CN) of the certificate subject.
+    ///
+    /// This value will also be added to the list of Subject Alternative Names (SAN).
     fn common_name(mut self, common_name: &str) -> Self {
         self.fields_mut().set_common_name(common_name);
         self
     }
+    /// Sets the signer name or identifier for the certificate.
     fn signer(mut self, signer: &str) -> Self {
         self.fields_mut().set_signer(signer);
         self
     }
-    /// A list of altrnative names(SAN) the Common Name(CN) is always included
+    /// Sets the list of Subject Alternative Names (SAN).
+    ///
+    /// The Common Name (CN) is always included automatically.
     fn alternative_names(mut self, alternative_names: Vec<&str>) -> Self {
         self.fields_mut().set_alternative_names(alternative_names);
         self
     }
-    /// Country, a valid two char value
+    /// Sets the country name (C), which must be a valid two-letter country code.
     fn country_name(mut self, country_name: &str) -> Self {
         self.fields_mut().set_country_name(country_name);
         self
     }
-    /// State, province an utf-8 value
+    /// Sets the state or province name (ST) as a UTF-8 string.
     fn state_province(mut self, state_province: &str) -> Self {
         self.fields_mut().set_state_province(state_province);
         self
     }
-    /// Org. an utf-8 value
+    /// Sets the organization name (O) as a UTF-8 string.
     fn organization(mut self, organization: &str) -> Self {
         self.fields_mut().set_organization(organization);
         self
     }
-    /// Locality, represents the city, town, or locality of the certificate subject
+    /// Sets the locality name (L), typically representing the city or town.
     fn locality_time(mut self, locality_time: &str) -> Self {
         self.fields_mut().set_locality_time(locality_time);
         self
     }
-    /// Selects what type of key to use RSA or elliptic
+    /// Sets the type of key to generate (e.g., RSA or Elliptic Curve).
     fn key_type(mut self, key_type: KeyType) -> Self {
         self.fields_mut().set_key_type(key_type);
         self
     }
-    /// Selects what alg to use for signature
+    /// Sets the signature algorithm to use when signing the certificate.
     fn signature_alg(mut self, signature_alg: HashAlg) -> Self {
         self.fields_mut().set_signature_alg(signature_alg);
         self
     }
 
-    /// Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
+    /// Sets the allowed usages for the certificate (e.g., key signing, digital signature).
+    ///
+    /// This includes both `KeyUsage` and `ExtendedKeyUsage` extensions.
     fn key_usage(mut self, key_usage: HashSet<Usage>) -> Self {
         self.fields_mut().set_key_usage(key_usage);
         self
@@ -523,19 +597,28 @@ impl CertBuilder {
             ca: false,
         }
     }
-    /// start date that the certificate should be valid yyyy-mm-dd
+    /// Sets the start date from which the certificate should be valid.
+    ///
+    /// # Arguments
+    /// * `valid_from` - A string in the format `yyyy-mm-dd`.
     pub fn valid_from(mut self, valid_from: &str) -> Self {
         self.valid_from =
             create_asn1_time_from_date(valid_from).expect("Failed to parse valid_from date");
         self
     }
-    /// end date that the certificate should no longer be valid yyyy-mm-dd
+    /// Sets the end date after which the certificate should no longer be valid.
+    ///
+    /// # Arguments
+    /// * `valid_to` - A string in the format `yyyy-mm-dd`.
     pub fn valid_to(mut self, valid_to: &str) -> Self {
         self.valid_to =
             create_asn1_time_from_date(valid_to).expect("Failed to parse valid_to date");
         self
     }
-    // if this certificate be a Certificate Authority (CN)
+    /// Specifies whether the certificate should be a Certificate Authority (CA).
+    ///
+    /// # Arguments
+    /// * `ca` - `true` if the certificate should be a CA, `false` otherwise.
     pub fn is_ca(mut self, ca: bool) -> Self {
         if ca {
             self.ca = ca;
