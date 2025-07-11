@@ -270,13 +270,7 @@ fn create_signed_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>
     let root_cert = ca.build_and_self_sign()?;
     let csr_builder = CsrBuilder::new().common_name("example2.com");
     let csr = csr_builder.certificate_signing_request()?;
-    let cert = csr.build_signed_certificate(
-        &root_cert,
-        CsrOptions {
-            valid_to: "2045-01-01".into(),
-            ca: false,
-        },
-    )?;
+    let cert = csr.build_signed_certificate(&root_cert, CsrOptions::new())?;
 
     assert_eq!(
         get_clean_subject_name(&cert.x509),
@@ -293,15 +287,9 @@ fn create_signed_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>
 fn create_signed_ca_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>> {
     let ca = CertBuilder::new().common_name("My Test Ca").is_ca(true);
     let root_cert = ca.build_and_self_sign()?;
-    let csr_builder = CsrBuilder::new().common_name("example2.com").is_ca(true);
+    let csr_builder = CsrBuilder::new().common_name("example2.com");
     let csr = csr_builder.certificate_signing_request()?;
-    let cert = csr.build_signed_certificate(
-        &root_cert,
-        CsrOptions {
-            valid_to: "2045-01-01".into(),
-            ca: true,
-        },
-    )?;
+    let cert = csr.build_signed_certificate(&root_cert, CsrOptions::new().is_ca(true))?;
 
     assert_eq!(
         get_clean_subject_name(&cert.x509),
@@ -314,9 +302,24 @@ fn create_signed_ca_certificate_from_csr() -> Result<(), Box<dyn std::error::Err
         cert.x509.issuer_name().to_der().unwrap(),
         root_cert.x509.subject_name().to_der().unwrap()
     );
+    assert_eq!(count_key_usage_extension_fields(&cert.x509), 1);
+
     Ok(())
 }
 
+#[test]
+fn test_no_multiple_key_usages() -> Result<(), Box<dyn std::error::Error>> {
+    let ca = CertBuilder::new().common_name("My Test Ca").is_ca(true);
+    let root_cert = ca.build_and_self_sign()?;
+    let csr_builder = CsrBuilder::new()
+        .common_name("example2.com")
+        .key_usage(HashSet::from([Usage::contentcommitment]));
+    let csr = csr_builder.certificate_signing_request()?;
+    let cert = csr.build_signed_certificate(&root_cert, CsrOptions::new().is_ca(true))?;
+
+    assert_eq!(count_key_usage_extension_fields(&cert.x509), 1);
+    Ok(())
+}
 fn get_clean_subject_name(x509: &X509) -> Option<String> {
     let subject_name = x509.subject_name();
     if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next() {
@@ -342,5 +345,14 @@ fn has_ca_cert_and_crl_sign(cert: &X509) -> bool {
             && text.contains("CA:TRUE")
     } else {
         false
+    }
+}
+
+fn count_key_usage_extension_fields(cert: &X509) -> usize {
+    if let Ok(text) = cert.to_text() {
+        let text = String::from_utf8_lossy(&text);
+        text.matches("X509v3 Key Usage").count()
+    } else {
+        0
     }
 }

@@ -84,8 +84,8 @@
 //!
 //! let csr_builder = CsrBuilder::new().common_name("example2.com");
 //! let csr = csr_builder.certificate_signing_request().expect("Failed to generate csr");
-//!
-//! let cert = csr.build_signed_certificate(&root_cert, CsrOptions {valid_to: "2026-07-10".into(),ca: false});
+//! let options = CsrOptions::new();
+//! let cert = csr.build_signed_certificate(&root_cert, options);
 //! assert!(cert.is_ok());
 //! ```
 //!

@@ -74,7 +74,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .state_province("Stockholm")
         .organization("My org")
         .locality_time("Stockholm")
-        .is_ca(false)
         .alternative_names(vec!["example2.com", "www.example2.com"])
         .key_usage(
             [
@@ -99,13 +98,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .alternative_names(vec!["ca.com", "www.ca.com"])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
     let root_cert = ca.build_and_self_sign()?;
-    let new_cert_from_csr = csr.build_signed_certificate(
-        &root_cert,
-        CsrOptions {
-            valid_to: "2026-07-10".into(),
-            ca: false,
-        },
-    )?;
+    let options = CsrOptions::new().is_ca(true);
+
+    let new_cert_from_csr = csr.build_signed_certificate(&root_cert, options)?;
     new_cert_from_csr.save("./certs", "new_cert_from_csr")?;
 
     Ok(())

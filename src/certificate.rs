@@ -147,8 +147,34 @@ impl X509Parts for Csr {
     }
 }
 pub struct CsrOptions {
-    pub valid_to: String,
-    pub ca: bool,
+    valid_to: Asn1Time,
+    valid_from: Asn1Time,
+    ca: bool,
+}
+impl CsrOptions {
+    pub fn new() -> Self {
+        Self {
+            ca: false,
+            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
+            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
+        }
+    }
+    /// start date that the certificate should be valid yyyy-mm-dd
+    pub fn valid_from(mut self, valid_from: &str) -> Self {
+        self.valid_from =
+            create_asn1_time_from_date(valid_from).expect("Failed to parse valid_from date");
+        self
+    }
+    /// end date that the certificate should no longer be valid yyyy-mm-dd
+    pub fn valid_to(mut self, valid_to: &str) -> Self {
+        self.valid_to =
+            create_asn1_time_from_date(valid_to).expect("Failed to parse valid_to date");
+        self
+    }
+    pub fn is_ca(mut self, ca: bool) -> Self {
+        self.ca = ca;
+        self
+    }
 }
 impl Csr {
     /// Read a certificate signing request from file
@@ -185,10 +211,14 @@ impl Csr {
         let parsed_csr = X509CertificationRequest::from_der(&der)?;
 
         let req_ext = parsed_csr.1.requested_extensions();
+        let mut any_key_used = false;
         if let Some(exts) = req_ext {
             for ext in exts {
                 match ext {
                     ParsedExtension::KeyUsage(ku) => {
+                        any_key_used = true;
+                        let mut cert_sign_added = false;
+                        let mut crl_sign_added = false;
                         let mut usage = openssl::x509::extension::KeyUsage::new();
                         if ku.digital_signature() {
                             usage.digital_signature();
@@ -197,15 +227,25 @@ impl Csr {
                             usage.key_encipherment();
                         }
                         if ku.key_cert_sign() {
+                            cert_sign_added = true;
                             usage.key_cert_sign();
                         }
                         if ku.non_repudiation() {
                             usage.non_repudiation();
                         }
                         if ku.crl_sign() {
+                            crl_sign_added = true;
                             usage.crl_sign();
                         }
 
+                        if options.ca {
+                            if !cert_sign_added {
+                                usage.key_cert_sign();
+                            }
+                            if !crl_sign_added {
+                                usage.crl_sign();
+                            }
+                        }
                         builder.append_extension(usage.build()?)?;
                     }
                     ParsedExtension::ExtendedKeyUsage(eku) => {
@@ -244,11 +284,15 @@ impl Csr {
         }
         if options.ca {
             builder.append_extension(BasicConstraints::new().ca().build()?)?;
+            if !any_key_used {
+                let key_usage = KeyUsage::new().key_cert_sign().crl_sign().build().unwrap();
+                builder.append_extension(key_usage)?;
+            }
         } else {
             builder.append_extension(BasicConstraints::new().build()?)?;
         }
-        builder.set_not_before(Asn1Time::days_from_now(0)?.as_ref())?;
-        builder.set_not_after(create_asn1_time_from_date(&options.valid_to)?.as_ref())?;
+        builder.set_not_before(&options.valid_from)?;
+        builder.set_not_after(&options.valid_to)?;
         let serial_number = {
             let mut serial = BigNum::new()?;
             serial.rand(159, openssl::bn::MsbOption::MAYBE_ZERO, false)?;
@@ -315,7 +359,6 @@ pub trait BuilderCommon {
     fn set_locality_time(&mut self, locality_time: &str);
     fn set_key_type(&mut self, key_type: KeyType);
     fn set_signature_alg(&mut self, signature_alg: HashAlg);
-    fn set_is_ca(&mut self, ca: bool);
     fn set_key_usage(&mut self, key_usage: HashSet<Usage>);
 }
 
@@ -330,7 +373,6 @@ pub struct BuilderFields {
     locality_time: String,
     key_type: Option<KeyType>,
     signature_alg: Option<HashAlg>,
-    ca: bool,
     usage: Option<HashSet<Usage>>,
 }
 impl BuilderCommon for BuilderFields {
@@ -372,15 +414,7 @@ impl BuilderCommon for BuilderFields {
     fn set_signature_alg(&mut self, signature_alg: HashAlg) {
         self.signature_alg = Some(signature_alg);
     }
-    // if this certificate be a Certificate Authority (CN)
-    fn set_is_ca(&mut self, ca: bool) {
-        if ca {
-            self.ca = ca;
-            let usage_set = self.usage.get_or_insert_with(HashSet::new);
-            usage_set.insert(Usage::certsign);
-            usage_set.insert(Usage::crlsign);
-        }
-    }
+
     // Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
     fn set_key_usage(&mut self, key_usage: HashSet<Usage>) {
         match &mut self.usage {
@@ -407,7 +441,6 @@ impl Default for BuilderFields {
             locality_time: Default::default(),
             key_type: Default::default(),
             signature_alg: Default::default(),
-            ca: false,
             usage: Default::default(),
         }
     }
@@ -460,11 +493,6 @@ pub trait UseesBuilderFields: Sized {
         self.fields_mut().set_signature_alg(signature_alg);
         self
     }
-    /// if this certificate be a Certificate Authority (CN)
-    fn is_ca(mut self, ca: bool) -> Self {
-        self.fields_mut().set_is_ca(ca);
-        self
-    }
 
     /// Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
     fn key_usage(mut self, key_usage: HashSet<Usage>) -> Self {
@@ -478,6 +506,7 @@ pub struct CertBuilder {
     fields: BuilderFields,
     valid_from: Asn1Time,
     valid_to: Asn1Time,
+    ca: bool,
 }
 impl UseesBuilderFields for CertBuilder {
     fn fields_mut(&mut self) -> &mut BuilderFields {
@@ -491,6 +520,7 @@ impl CertBuilder {
             fields: BuilderFields::default(),
             valid_from: Asn1Time::days_from_now(0).unwrap(), // today
             valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
+            ca: false,
         }
     }
     /// start date that the certificate should be valid yyyy-mm-dd
@@ -503,6 +533,15 @@ impl CertBuilder {
     pub fn valid_to(mut self, valid_to: &str) -> Self {
         self.valid_to =
             create_asn1_time_from_date(valid_to).expect("Failed to parse valid_to date");
+        self
+    }
+    // if this certificate be a Certificate Authority (CN)
+    pub fn is_ca(mut self, ca: bool) -> Self {
+        if ca {
+            self.ca = ca;
+            self.fields
+                .set_key_usage(HashSet::from([Usage::certsign, Usage::crlsign]));
+        }
         self
     }
 
@@ -582,7 +621,7 @@ impl CertBuilder {
         }
 
         let key_usage = self.fields.usage.clone().unwrap_or_default();
-        if self.fields.ca {
+        if self.ca {
             builder.append_extension(BasicConstraints::new().ca().build()?)?;
         } else {
             builder.append_extension(BasicConstraints::new().build()?)?;
