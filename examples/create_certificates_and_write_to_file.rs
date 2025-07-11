@@ -1,6 +1,6 @@
 use cert_helper::certificate::{
-    CertBuilder, Certificate, CsrBuilder, HashAlg, KeyType, Usage, UseesBuilderFields, X509Common,
-    verify_cert,
+    CertBuilder, Certificate, CsrBuilder, CsrOptions, HashAlg, KeyType, Usage, UseesBuilderFields,
+    X509Common, verify_cert,
 };
 use std::fs;
 
@@ -98,7 +98,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .alternative_names(vec!["ca.com", "www.ca.com"])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
     let root_cert = ca.build_and_self_sign()?;
-    let new_cert_from_csr = csr.build_signed_certificate(&root_cert, "2026-07-10")?;
+    let options = CsrOptions::new().is_ca(true);
+
+    let new_cert_from_csr = csr.build_signed_certificate(&root_cert, options)?;
     new_cert_from_csr.save("./certs", "new_cert_from_csr")?;
 
     Ok(())
