@@ -84,7 +84,7 @@
 //!
 //! let csr_builder = CsrBuilder::new().common_name("example2.com");
 //! let csr = csr_builder.certificate_signing_request().expect("Failed to generate csr");
-//! let options = CsrOptions::new();
+//! let options = CsrOptions::new();// used for enabling csr for CA certficates
 //! let cert = csr.build_signed_certificate(&root_cert, options);
 //! assert!(cert.is_ok());
 //! ```
