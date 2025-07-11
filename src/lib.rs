@@ -77,7 +77,7 @@
 //!```
 //! ## Basic Example creating a signed certificate from a signing request
 //! ```rust
-//! use cert_helper::certificate::{CertBuilder, Csr, verify_cert, UseesBuilderFields, CsrBuilder};
+//! use cert_helper::certificate::{CertBuilder, Csr, verify_cert, UseesBuilderFields, CsrBuilder,CsrOptions};
 //!
 //! let ca = CertBuilder::new().common_name("My Test Ca").is_ca(true);
 //! let root_cert = ca.build_and_self_sign().expect("failed to create root certificate");
@@ -85,7 +85,7 @@
 //! let csr_builder = CsrBuilder::new().common_name("example2.com");
 //! let csr = csr_builder.certificate_signing_request().expect("Failed to generate csr");
 //!
-//! let cert = csr.build_signed_certificate(&root_cert,"2045-01-01");
+//! let cert = csr.build_signed_certificate(&root_cert, CsrOptions {valid_to: "2026-07-10".into(),ca: false});
 //! assert!(cert.is_ok());
 //! ```
 //!

@@ -1,5 +1,5 @@
 use cert_helper::certificate::{
-    CertBuilder, CsrBuilder, HashAlg, KeyType, Usage, UseesBuilderFields,
+    CertBuilder, CsrBuilder, CsrOptions, HashAlg, KeyType, Usage, UseesBuilderFields,
     create_cert_chain_from_cert_list, verify_cert,
 };
 use openssl::nid::Nid;
@@ -15,7 +15,7 @@ fn create_minimal_self_signed_cert() -> Result<(), Box<dyn std::error::Error>> {
         x509.issuer_name().to_der().ok(),
         x509.subject_name().to_der().ok()
     );
-    if !has_cert_and_crl_sign(&x509) {
+    if !has_ca_cert_and_crl_sign(&x509) {
         return Err("Missing Certificate Sign or CRL Sign usage".into());
     }
     Ok(())
@@ -270,12 +270,46 @@ fn create_signed_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>
     let root_cert = ca.build_and_self_sign()?;
     let csr_builder = CsrBuilder::new().common_name("example2.com");
     let csr = csr_builder.certificate_signing_request()?;
-    let cert = csr.build_signed_certificate(&root_cert, "2045-01-01")?;
+    let cert = csr.build_signed_certificate(
+        &root_cert,
+        CsrOptions {
+            valid_to: "2045-01-01".into(),
+            ca: false,
+        },
+    )?;
 
     assert_eq!(
         get_clean_subject_name(&cert.x509),
         Some("example2.com".into())
     );
+    assert_eq!(
+        cert.x509.issuer_name().to_der().unwrap(),
+        root_cert.x509.subject_name().to_der().unwrap()
+    );
+    Ok(())
+}
+
+#[test]
+fn create_signed_ca_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>> {
+    let ca = CertBuilder::new().common_name("My Test Ca").is_ca(true);
+    let root_cert = ca.build_and_self_sign()?;
+    let csr_builder = CsrBuilder::new().common_name("example2.com").is_ca(true);
+    let csr = csr_builder.certificate_signing_request()?;
+    let cert = csr.build_signed_certificate(
+        &root_cert,
+        CsrOptions {
+            valid_to: "2045-01-01".into(),
+            ca: true,
+        },
+    )?;
+
+    assert_eq!(
+        get_clean_subject_name(&cert.x509),
+        Some("example2.com".into())
+    );
+    if !has_ca_cert_and_crl_sign(&cert.x509) {
+        return Err("Missing Certificate Sign or CRL Sign usage".into());
+    }
     assert_eq!(
         cert.x509.issuer_name().to_der().unwrap(),
         root_cert.x509.subject_name().to_der().unwrap()
@@ -299,12 +333,13 @@ fn get_clean_subject_name(x509: &X509) -> Option<String> {
 ///
 /// Check the function can_sign_cert in certificate.rs file on how to do
 /// correct check by fetching the exact extesnsions.
-fn has_cert_and_crl_sign(cert: &X509) -> bool {
+fn has_ca_cert_and_crl_sign(cert: &X509) -> bool {
     if let Ok(text) = cert.to_text() {
         let text = String::from_utf8_lossy(&text);
         text.contains("X509v3 Key Usage")
             && text.contains("Certificate Sign")
             && text.contains("CRL Sign")
+            && text.contains("CA:TRUE")
     } else {
         false
     }

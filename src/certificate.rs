@@ -146,6 +146,10 @@ impl X509Parts for Csr {
         "_csr.pem"
     }
 }
+pub struct CsrOptions {
+    pub valid_to: String,
+    pub ca: bool,
+}
 impl Csr {
     /// Read a certificate signing request from file
     pub fn load_csr<C: AsRef<Path>>(csr_pem_file: C) -> Result<Self, Box<dyn std::error::Error>> {
@@ -160,7 +164,7 @@ impl Csr {
     pub fn build_signed_certificate(
         &self,
         signer: &Certificate,
-        valid_to: &str,
+        options: CsrOptions,
     ) -> Result<Certificate, Box<dyn std::error::Error>> {
         let can_sign = can_sign_cert(&signer.x509)?;
         if !can_sign {
@@ -238,8 +242,13 @@ impl Csr {
                 }
             }
         }
+        if options.ca {
+            builder.append_extension(BasicConstraints::new().ca().build()?)?;
+        } else {
+            builder.append_extension(BasicConstraints::new().build()?)?;
+        }
         builder.set_not_before(Asn1Time::days_from_now(0)?.as_ref())?;
-        builder.set_not_after(create_asn1_time_from_date(valid_to)?.as_ref())?;
+        builder.set_not_after(create_asn1_time_from_date(&options.valid_to)?.as_ref())?;
         let serial_number = {
             let mut serial = BigNum::new()?;
             serial.rand(159, openssl::bn::MsbOption::MAYBE_ZERO, false)?;
@@ -365,7 +374,12 @@ impl BuilderCommon for BuilderFields {
     }
     // if this certificate be a Certificate Authority (CN)
     fn set_is_ca(&mut self, ca: bool) {
-        self.ca = ca;
+        if ca {
+            self.ca = ca;
+            let usage_set = self.usage.get_or_insert_with(HashSet::new);
+            usage_set.insert(Usage::certsign);
+            usage_set.insert(Usage::crlsign);
+        }
     }
     // Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
     fn set_key_usage(&mut self, key_usage: HashSet<Usage>) {
@@ -567,10 +581,8 @@ impl CertBuilder {
             None => builder.set_issuer_name(&name)?,
         }
 
-        let mut key_usage = self.fields.usage.clone().unwrap_or_default();
+        let key_usage = self.fields.usage.clone().unwrap_or_default();
         if self.fields.ca {
-            key_usage.insert(Usage::certsign);
-            key_usage.insert(Usage::crlsign);
             builder.append_extension(BasicConstraints::new().ca().build()?)?;
         } else {
             builder.append_extension(BasicConstraints::new().build()?)?;
@@ -654,6 +666,7 @@ impl CsrBuilder {
             san.dns(s);
         }
         extensions.push(san.build(&builder.x509v3_context(None))?)?;
+
         builder.add_extensions(&extensions)?;
         builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
         let csr = builder.build();
