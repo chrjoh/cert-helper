@@ -33,6 +33,7 @@ macro_rules! vec_str_to_hs {
     };
 }
 /// Defines what type of key that can be used with the certificate
+#[derive(Debug, Clone)]
 pub enum KeyType {
     /// RSA key with a 2048-bit length.
     RSA2048,
@@ -48,6 +49,7 @@ pub enum KeyType {
     P521,
 }
 /// Defines which hash algorithm to be used in certificate signing
+#[derive(Debug, Clone)]
 pub enum HashAlg {
     /// SHA-1 (Secure Hash Algorithm 1), now considered weak and generally discouraged for new certificates.
     SHA1,
@@ -190,6 +192,10 @@ impl X509Parts for Csr {
         "_csr.pem"
     }
 }
+/// Helper trait to document that Csr implements X509Common
+pub trait CsrX509Common: X509Common {}
+impl CsrX509Common for Csr {}
+
 /// Holds configuration options for creating a certificate from a Certificate Signing Request (CSR).
 pub struct CsrOptions {
     valid_to: Asn1Time,
@@ -371,6 +377,7 @@ impl Csr {
     }
 }
 /// Holds the generated X.509 certificate and its associated private key.
+#[derive(Clone)]
 pub struct Certificate {
     /// The X.509 certificate.
     pub x509: X509,
@@ -395,6 +402,10 @@ impl X509Parts for Certificate {
         "_cert.pem"
     }
 }
+
+/// Helper trait to document that Certificate implements X509Common
+pub trait CertificateX509Common: X509Common {}
+impl CertificateX509Common for Certificate {}
 
 impl Certificate {
     /// Loads a certificate and private key that are in PEM format from file
@@ -421,6 +432,7 @@ pub trait BuilderCommon {
     fn set_country_name(&mut self, name: &str);
     fn set_state_province(&mut self, name: &str);
     fn set_organization(&mut self, name: &str);
+    fn set_organization_unit(&mut self, name: &str);
     fn set_alternative_names(&mut self, alternative_names: Vec<&str>);
     fn set_locality_time(&mut self, locality_time: &str);
     fn set_key_type(&mut self, key_type: KeyType);
@@ -429,10 +441,12 @@ pub trait BuilderCommon {
 }
 
 /// Stores common configurable fields used during X509 certificate or CSR generation.
+#[derive(Debug)]
 pub struct BuilderFields {
     common_name: String,
     signer: Option<String>, //place holder for maybe future use??
     alternative_names: HashSet<String>,
+    organization_unit: String,
     country_name: String,
     state_province: String,
     organization: String,
@@ -467,6 +481,10 @@ impl BuilderCommon for BuilderFields {
     // Org. an utf-8 value
     fn set_organization(&mut self, organization: &str) {
         self.organization = organization.into();
+    }
+    // Org. unit an utf-8 value
+    fn set_organization_unit(&mut self, organization_unit: &str) {
+        self.organization_unit = organization_unit.into();
     }
     // Locality, represents the city, town, or locality of the certificate subject
     fn set_locality_time(&mut self, locality_time: &str) {
@@ -504,6 +522,7 @@ impl Default for BuilderFields {
             country_name: Default::default(),
             state_province: Default::default(),
             organization: Default::default(),
+            organization_unit: Default::default(),
             locality_time: Default::default(),
             key_type: Default::default(),
             signature_alg: Default::default(),
@@ -582,6 +601,7 @@ pub struct CertBuilder {
     valid_to: Asn1Time,
     ca: bool,
 }
+
 impl UseesBuilderFields for CertBuilder {
     fn fields_mut(&mut self) -> &mut BuilderFields {
         &mut self.fields
@@ -681,6 +701,11 @@ impl CertBuilder {
         if !self.fields.organization.trim().is_empty() {
             name_builder.append_entry_by_nid(Nid::ORGANIZATIONNAME, &self.fields.organization)?;
         }
+        if !self.fields.organization_unit.trim().is_empty() {
+            name_builder
+                .append_entry_by_nid(Nid::ORGANIZATIONALUNITNAME, &self.fields.organization_unit)?;
+        }
+
         let name = name_builder.build();
 
         let mut builder = X509::builder()?;
