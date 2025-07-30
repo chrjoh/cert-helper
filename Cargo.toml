@@ -26,10 +26,18 @@ path = "src/lib.rs"
 name = "create_certificates_and_write_to_file"
 path = "examples/create_certificates_and_write_to_file.rs"
 
+[[example]]
+name = "crl_example"
+path = "examples/crl_example.rs"
+
 [dependencies]
+bit-vec = "0.8.0"
 chrono = "0.4.41"
+num-bigint = "0.4.6"
 openssl = { version = "0.10.73" }
+openssl-sys = "0.9.109"
 x509-parser = "0.17.0"
+yasna = "0.5.2"
 
 [dev-dependencies]
 tempfile = "3"

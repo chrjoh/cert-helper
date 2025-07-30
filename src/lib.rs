@@ -140,3 +140,4 @@
 //! | contentcommitment | allowed to perfom document signature (prev non repudation) |
 
 pub mod certificate;
+pub mod crl;
