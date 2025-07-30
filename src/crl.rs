@@ -254,3 +254,93 @@ fn get_clean_subject_name(x509: &X509) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::certificate::{CertBuilder, Certificate, UseesBuilderFields};
+    use chrono::{Duration, Utc};
+    use num_bigint::BigUint;
+    use openssl::x509::X509;
+    use std::str::FromStr;
+
+    fn dummy_certificate() -> Certificate {
+        CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_new_builder() {
+        let cert = dummy_certificate();
+        let builder = X509CrlBuilder::new(cert);
+        assert_eq!(builder.revoked.len(), 0);
+    }
+
+    #[test]
+    fn test_add_revoked_cert() {
+        let cert = dummy_certificate();
+        let mut builder = X509CrlBuilder::new(cert);
+        let serial = BigUint::from(123u32);
+        let date = Utc::now();
+        builder.add_revoked_cert(serial.clone(), date);
+        assert_eq!(builder.revoked.len(), 1);
+        assert_eq!(builder.revoked[0].serial, serial);
+    }
+
+    #[test]
+    fn test_set_update_times() {
+        let cert = dummy_certificate();
+        let mut builder = X509CrlBuilder::new(cert);
+        let this_update = Utc::now();
+        let next_update = this_update + Duration::days(10);
+        builder.set_update_times(this_update, next_update);
+        assert_eq!(builder.this_update, this_update);
+        assert_eq!(builder.next_update, next_update);
+    }
+
+    #[test]
+    fn test_build_and_sign() {
+        let cert = dummy_certificate();
+
+        let builder = X509CrlBuilder::new(cert);
+        let crl_der = builder.build_and_sign();
+        assert!(!crl_der.is_empty());
+    }
+
+    #[test]
+    fn test_from_der_valid_crl() {
+        let cert = dummy_certificate();
+        let mut builder = X509CrlBuilder::new(cert.clone());
+
+        // Add a revoked certificate
+        let serial = BigUint::from(456u32);
+        let revocation_date = Utc::now();
+        builder.add_revoked_cert(serial.clone(), revocation_date);
+
+        // Build and sign the CRL
+        let crl_der = builder.build_and_sign();
+
+        // Parse the CRL back
+        let parsed = X509CrlBuilder::from_der(&crl_der, cert).expect("Failed to parse DER");
+
+        // Check that the parsed data matches
+        assert_eq!(parsed.revoked.len(), 1);
+        assert_eq!(parsed.revoked[0].serial, serial);
+        assert_eq!(
+            parsed.revoked[0].revocation_date.timestamp(),
+            revocation_date.timestamp()
+        );
+    }
+
+    #[test]
+    fn test_from_der_invalid_data() {
+        let cert = dummy_certificate();
+        let invalid_der = b"not-a-valid-der";
+
+        let result = X509CrlBuilder::from_der(invalid_der, cert);
+        assert!(result.is_err());
+    }
+}
