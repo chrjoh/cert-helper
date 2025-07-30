@@ -1,6 +1,6 @@
 [package]
 name = "cert-helper"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 authors = ["Christer Johansson"]
 build = false
@@ -9,7 +9,7 @@ autoexamples = false
 autobenches = false
 description = "Helper library for creating certificates using openssl"
 readme = "README.md"
-keywords = ["x509", "Certificates"]
+keywords = ["x509", "Certificates", "CRL"]
 categories = ["cryptography"]
 license = "MIT"
 
