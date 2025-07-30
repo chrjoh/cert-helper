@@ -4,6 +4,10 @@ use num_bigint::BigUint;
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
 use openssl::x509::X509;
+use openssl::x509::X509Crl;
+use std::fs::{File, create_dir_all};
+use std::io::Write;
+use std::path::Path;
 use yasna::models::ObjectIdentifier;
 use yasna::tags::{TAG_BITSTRING, TAG_GENERALIZEDTIME, TAG_SEQUENCE};
 use yasna::{ASN1Error, ASN1ErrorKind};
@@ -246,6 +250,56 @@ impl X509CrlBuilder {
         })
     }
 }
+/// Writes a DER-encoded X.509 Certificate Revocation List (CRL) to a PEM-formatted file.
+///
+/// This function takes a byte slice containing DER-encoded CRL data, converts it to PEM format,
+/// and writes it to a file at the specified path and filename. If the directory does not exist,
+/// it will be created.
+///
+/// # Type Parameters
+///
+/// * `P` - A type that can be referenced as a `Path`, representing the directory path.
+/// * `F` - A type that can be referenced as a `Path`, representing the filename.
+///
+/// # Arguments
+///
+/// * `der_data` - A byte slice containing the DER-encoded CRL.
+/// * `path` - The directory path where the PEM file should be written.
+/// * `filename` - The name of the PEM file to be created.
+///
+/// # Returns
+///
+/// * `Ok(())` if the file was successfully written.
+/// * `Err` if any error occurred during directory creation, file creation, DER parsing, or writing.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// - The directory cannot be created.
+/// - The filename cannot be extracted.
+/// - The file cannot be created.
+/// - The DER data cannot be parsed into a CRL.
+/// - The CRL cannot be converted to PEM format.
+/// - The PEM data cannot be written to the file.
+pub fn write_der_crl_as_pem<P: AsRef<Path>, F: AsRef<Path>>(
+    der_data: &[u8],
+    path: P,
+    filename: F,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_dir_all(&path)?;
+    let os_file = filename
+        .as_ref()
+        .file_name()
+        .ok_or("Failed to extract file name")?;
+    let full_path = path.as_ref().join(os_file);
+    let mut file = File::create(full_path)?;
+
+    let crl = X509Crl::from_der(der_data)?;
+    let pem_data = crl.to_pem()?;
+    file.write_all(&pem_data)?;
+
+    Ok(())
+}
 
 fn write_generalized_time(writer: yasna::DERWriter, time: &chrono::DateTime<chrono::Utc>) {
     let time_str = time.format("%Y%m%d%H%M%SZ").to_string();
@@ -302,7 +356,9 @@ mod tests {
     use super::*;
     use crate::certificate::{CertBuilder, Certificate, UseesBuilderFields};
     use chrono::{Duration, Utc};
-    use num_bigint::BigUint;
+    use num_bigint::{BigUint, ToBigUint};
+    use std::fs;
+    use tempfile::tempdir;
 
     fn dummy_certificate() -> Certificate {
         CertBuilder::new()
@@ -382,5 +438,27 @@ mod tests {
 
         let result = X509CrlBuilder::from_der(invalid_der, cert);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_write_der_crl_as_pem() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        let mut builder = X509CrlBuilder::new(ca);
+        builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now());
+
+        let crl_der = builder.build_and_sign();
+
+        let dir = tempdir().unwrap();
+        let file_name = "test_crl.pem";
+        let result = write_der_crl_as_pem(&crl_der, dir.path(), file_name);
+
+        assert!(result.is_ok());
+        let file_path = dir.path().join(file_name);
+        let pem_contents = fs::read_to_string(file_path).unwrap();
+        assert!(pem_contents.contains("-----BEGIN X509 CRL-----"));
     }
 }

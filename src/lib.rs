@@ -114,7 +114,7 @@
 //! use cert_helper::certificate::{CertBuilder, UseesBuilderFields};
 //! use cert_helper::crl::X509CrlBuilder;
 //! use chrono::Utc;
-//!use num_bigint::BigUint;
+//! use num_bigint::BigUint;
 //!
 //! let ca = CertBuilder::new()
 //!    .common_name("My Test Ca")
