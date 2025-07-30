@@ -30,5 +30,5 @@ fn main() {
     builder.set_update_times(Utc::now(), Utc::now() + chrono::Duration::days(30));
 
     let crl_der = builder.build_and_sign();
-    fs::write("crl2.der", crl_der).expect("failed to save cfrl2");
+    fs::write("crl2.der", crl_der).expect("failed to save crl2");
 }

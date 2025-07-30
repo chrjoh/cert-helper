@@ -107,6 +107,25 @@
 //!
 //! ```
 //!
+//! ## Example on how to create a certifcate revocation list(clr)
+//! ```rust
+//! use cert_helper::certificate::{CertBuilder, UseesBuilderFields};
+//! use cert_helper::crl::X509CrlBuilder;
+//! use chrono::Utc;
+//! use num_bigint::ToBigUint;
+//!
+//! let ca = CertBuilder::new()
+//!    .common_name("My Test Ca")
+//!    .is_ca(true)
+//!    .build_and_self_sign()
+//!    .unwrap();
+//! let mut builder = X509CrlBuilder::new(ca);
+//! builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now());
+//!
+//! let crl_der = builder.build_and_sign();
+//!
+//! ```
+//!
 //! ## Config
 //!
 //! Values that can be selected for building a certificate
