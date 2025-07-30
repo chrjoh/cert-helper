@@ -1,16 +1,19 @@
 #![allow(unused_imports)]
+use crate::certificate::Certificate;
 use bit_vec::BitVec;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use num_bigint::BigUint;
 use openssl::hash::MessageDigest;
+use openssl::nid::Nid;
 use openssl::pkey::PKey;
+use openssl::x509::X509;
 use std::error::Error;
 use x509_parser::asn1_rs::AsTaggedImplicit;
 use yasna::models::ObjectIdentifier;
 use yasna::{ASN1Error, ASN1ErrorKind, BERReader, DERWriter, Tag, TagClass};
 
 pub struct X509CrlBuilder {
-    issuer_name: String,
+    signer: Certificate,
     revoked: Vec<RevokedCert>,
     this_update: DateTime<Utc>,
     next_update: DateTime<Utc>,
@@ -22,9 +25,9 @@ pub struct RevokedCert {
 }
 
 impl X509CrlBuilder {
-    pub fn new(issuer_cn: &str) -> Self {
+    pub fn new(signer: Certificate) -> Self {
         Self {
-            issuer_name: issuer_cn.to_string(),
+            signer,
             revoked: Vec::new(),
             this_update: Utc::now(),
             next_update: Utc::now() + chrono::Duration::days(30),
@@ -43,17 +46,18 @@ impl X509CrlBuilder {
         self.next_update = next_update;
     }
 
-    pub fn build_and_sign(&self, key: &PKey<openssl::pkey::Private>) -> Vec<u8> {
+    pub fn build_and_sign(&self) -> Vec<u8> {
         let tbs = yasna::construct_der(|writer| {
             writer.write_sequence(|writer| {
                 writer.next().write_u8(1); // Version v2
 
                 // Signature Algorithm
-                let sig_oid = signature_algorithm_oid("sha256WithRSAEncryption").unwrap();
+                let sig_alg = self.signer.x509.signature_algorithm().object().to_string();
+                let sig_oid = signature_algorithm_oid(&sig_alg).unwrap();
                 writer.next().write_sequence(|writer| {
                     writer
                         .next()
-                        .write_oid(&ObjectIdentifier::from_slice(&sig_oid)); // sha256WithRSAEncryption
+                        .write_oid(&ObjectIdentifier::from_slice(&sig_oid));
                     writer.next().write_null();
                 });
 
@@ -64,7 +68,9 @@ impl X509CrlBuilder {
                             writer
                                 .next()
                                 .write_oid(&ObjectIdentifier::from_slice(&[2, 5, 4, 3])); // CN
-                            writer.next().write_utf8_string(&self.issuer_name);
+                            writer.next().write_utf8_string(
+                                &get_clean_subject_name(&self.signer.x509).unwrap(),
+                            );
                         });
                     });
                 });
@@ -89,7 +95,9 @@ impl X509CrlBuilder {
         });
 
         // Sign the TBS
-        let mut signer = openssl::sign::Signer::new(MessageDigest::sha256(), key).unwrap();
+        let mut signer =
+            openssl::sign::Signer::new(MessageDigest::sha256(), self.signer.pkey.as_ref().unwrap())
+                .unwrap();
         signer.update(&tbs).unwrap();
         let signature = signer.sign_to_vec().unwrap();
 
@@ -99,7 +107,8 @@ impl X509CrlBuilder {
                 writer.next().write_der(&tbs);
 
                 // Signature Algorithm
-                let sig_oid = signature_algorithm_oid("sha256WithRSAEncryption").unwrap();
+                let sig_alg = self.signer.x509.signature_algorithm().object().to_string();
+                let sig_oid = signature_algorithm_oid(&sig_alg).unwrap();
                 writer.next().write_sequence(|writer| {
                     writer
                         .next()
@@ -120,7 +129,7 @@ impl X509CrlBuilder {
         })
     }
 
-    pub fn from_der(der: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_der(der: &[u8], signer: Certificate) -> Result<Self, Box<dyn std::error::Error>> {
         let (tbs_der, _sig_algo_oid, _sig_value) = yasna::parse_der(der, |reader| {
             reader.read_sequence(|reader| {
                 let tbs_der = reader.next().read_der()?;
@@ -140,7 +149,7 @@ impl X509CrlBuilder {
         })
         .map_err(|e| format!("ASN.1 parse error: {}", e))?;
 
-        let (issuer_name, this_update, next_update, revoked) =
+        let (_issuer_name, this_update, next_update, revoked) =
             yasna::parse_der(&tbs_der, |reader| {
                 reader.read_sequence(|reader| {
                     let _version = reader.next().read_u8()?;
@@ -192,7 +201,7 @@ impl X509CrlBuilder {
             .map_err(|e| format!("ASN.1 parse error: {}", e))?;
 
         Ok(Self {
-            issuer_name,
+            signer,
             this_update: this_update.unwrap(),
             next_update: next_update.unwrap(),
             revoked,
@@ -248,4 +257,14 @@ fn signature_algorithm_oid(name: &str) -> Option<&'static [u64]> {
         "ecdsa-with-SHA512" => Some(&[1, 2, 840, 10045, 4, 3, 4]),
         _ => None,
     }
+}
+
+fn get_clean_subject_name(x509: &X509) -> Option<String> {
+    let subject_name = x509.subject_name();
+    if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next() {
+        if let Ok(data) = entry.data().as_utf8() {
+            return Some(data.to_string());
+        }
+    }
+    None
 }
