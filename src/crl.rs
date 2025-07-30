@@ -1,17 +1,12 @@
-#![allow(unused_imports)]
 use crate::certificate::Certificate;
-use bit_vec::BitVec;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use num_bigint::BigUint;
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
-use openssl::pkey::PKey;
 use openssl::x509::X509;
-use std::error::Error;
-use x509_parser::asn1_rs::AsTaggedImplicit;
 use yasna::models::ObjectIdentifier;
 use yasna::tags::{TAG_BITSTRING, TAG_GENERALIZEDTIME, TAG_SEQUENCE};
-use yasna::{ASN1Error, ASN1ErrorKind, BERReader, DERWriter, Tag, TagClass};
+use yasna::{ASN1Error, ASN1ErrorKind};
 
 pub struct X509CrlBuilder {
     signer: Certificate,
@@ -261,8 +256,6 @@ mod tests {
     use crate::certificate::{CertBuilder, Certificate, UseesBuilderFields};
     use chrono::{Duration, Utc};
     use num_bigint::BigUint;
-    use openssl::x509::X509;
-    use std::str::FromStr;
 
     fn dummy_certificate() -> Certificate {
         CertBuilder::new()
