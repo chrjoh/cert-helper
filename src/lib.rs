@@ -11,6 +11,7 @@
 //! - Signing certificates from CSRs using a CA certificate and key
 //! - Reading and writing certificates, keys, and CSRs in PEM format
 //! - Validating certificate chains and properties
+//! - Create or update certificate revocation list(crl)
 //!
 //! ### Certificate Signing Requirements
 //! To sign another certificate, the signing certificate must:
@@ -25,6 +26,7 @@
 //! - Validating certificate chains in custom TLS setups
 //! - Creating CSRs to be signed by external or internal CAs
 //! - Issuing signed certificates from CSRs for controlled certificate management
+//! - Create crl for testing how a client handle certificate revocations
 //!
 //!
 //! ## Basic Example creating a certificate and private key

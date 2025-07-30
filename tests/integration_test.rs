@@ -2,6 +2,9 @@ use cert_helper::certificate::{
     CertBuilder, CsrBuilder, CsrOptions, HashAlg, KeyType, Usage, UseesBuilderFields,
     create_cert_chain_from_cert_list, verify_cert,
 };
+use cert_helper::crl::X509CrlBuilder;
+use chrono::Utc;
+use num_bigint::BigUint;
 use openssl::nid::Nid;
 use openssl::x509::X509;
 use std::collections::HashSet;
@@ -320,6 +323,25 @@ fn test_no_multiple_key_usages() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(count_key_usage_extension_fields(&cert.x509), 1);
     Ok(())
 }
+
+#[test]
+fn test_creating_crl_with_revocked_certificate() {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .build_and_self_sign()
+        .unwrap();
+    let revocked = CertBuilder::new()
+        .common_name("My Test")
+        .build_and_self_sign()
+        .unwrap();
+    let mut builder = X509CrlBuilder::new(ca);
+    let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
+    builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
+    let crl_der = builder.build_and_sign();
+    assert!(!crl_der.is_empty());
+}
+
 fn get_clean_subject_name(x509: &X509) -> Option<String> {
     let subject_name = x509.subject_name();
     if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next() {
