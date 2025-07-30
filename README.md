@@ -12,6 +12,7 @@ This library provides a set of utility functions to simplify common tasks such a
 - Signing certificates from CSRs using a CA certificate and key
 - Reading and writing certificates, keys, and CSRs in PEM format
 - Validating certificate chains and properties
+- Create or update certificate revocation list(crl)
 
 ### Certificate Signing Requirements
 
@@ -29,6 +30,7 @@ These constraints ensure that the certificate is recognized as a valid CA and ca
 - Validating certificate chains in custom TLS setups
 - Creating CSRs to be signed by external or internal CAs
 - Issuing signed certificates from CSRs for controlled certificate management
+- Create crl for testing how a client handle certificate revocations
 
 ## Basic Example creating a certificate and private key
 
@@ -113,6 +115,26 @@ match verify_cert(&cert_3.x509, &cert_1.x509, vec![&cert_2.x509]) {
    Ok(true) => println!("verify ok"),
    _ => println!("failed verify"),
 }
+
+```
+
+## Example on how to create a certifcate revocation list(clr)
+
+```rust
+use cert_helper::certificate::{CertBuilder, UseesBuilderFields};
+use cert_helper::crl::X509CrlBuilder;
+use chrono::Utc;
+use num_bigint::ToBigUint;
+
+let ca = CertBuilder::new()
+   .common_name("My Test Ca")
+   .is_ca(true)
+   .build_and_self_sign()
+   .unwrap();
+let mut builder = X509CrlBuilder::new(ca);
+builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now());
+
+let crl_der = builder.build_and_sign();
 
 ```
 

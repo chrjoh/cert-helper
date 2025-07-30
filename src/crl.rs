@@ -8,19 +8,37 @@ use yasna::models::ObjectIdentifier;
 use yasna::tags::{TAG_BITSTRING, TAG_GENERALIZEDTIME, TAG_SEQUENCE};
 use yasna::{ASN1Error, ASN1ErrorKind};
 
+/// Represents a builder for creating and signing X.509 Certificate Revocation Lists (CRLs).
+///
+/// The `X509CrlBuilder` allows you to construct a CRL by specifying a signer certificate,
+/// adding revoked certificates, setting update times, and finally building and signing the CRL.
 pub struct X509CrlBuilder {
+    /// The certificate used to sign the CRL.
     signer: Certificate,
+    /// A list of revoked certificates to include in the CRL.
     revoked: Vec<RevokedCert>,
+    /// The timestamp indicating when the CRL was generated.
     this_update: DateTime<Utc>,
+    /// The timestamp indicating when the next CRL will be issued.
     next_update: DateTime<Utc>,
 }
 
+/// Represents a single revoked certificate entry in a CRL.
 pub struct RevokedCert {
+    /// The serial number of the revoked certificate.
     serial: BigUint,
+    /// The date and time when the certificate was revoked.
     revocation_date: DateTime<Utc>,
 }
 
 impl X509CrlBuilder {
+    /// Creates a new `X509CrlBuilder` with the given signer certificate.
+    ///
+    /// The `this_update` is set to the current time, and `next_update` is set to 30 days later.
+    ///
+    /// # Arguments
+    ///
+    /// * `signer` - The certificate that will be used to sign the CRL.
     pub fn new(signer: Certificate) -> Self {
         Self {
             signer,
@@ -29,19 +47,36 @@ impl X509CrlBuilder {
             next_update: Utc::now() + chrono::Duration::days(30),
         }
     }
-
+    /// Adds a revoked certificate to the CRL.
+    ///
+    /// # Arguments
+    ///
+    /// * `serial` - The serial number of the revoked certificate.
+    /// * `revocation_date` - The date and time when the certificate was revoked.
     pub fn add_revoked_cert(&mut self, serial: BigUint, revocation_date: DateTime<Utc>) {
         self.revoked.push(RevokedCert {
             serial,
             revocation_date,
         });
     }
-
+    /// Sets the `this_update` and `next_update` timestamps for the CRL.
+    ///
+    /// # Arguments
+    ///
+    /// * `this_update` - The time when the CRL is issued.
+    /// * `next_update` - The time when the next CRL is expected to be issued.
     pub fn set_update_times(&mut self, this_update: DateTime<Utc>, next_update: DateTime<Utc>) {
         self.this_update = this_update;
         self.next_update = next_update;
     }
-
+    /// Builds and signs the CRL, returning the DER-encoded byte vector.
+    ///
+    /// This method constructs the CRL in ASN.1 DER format, signs it using the signer's private key,
+    /// and returns the final encoded CRL.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<u8>` containing the DER-encoded CRL.
     pub fn build_and_sign(&self) -> Vec<u8> {
         let tbs = yasna::construct_der(|writer| {
             writer.write_sequence(|writer| {
@@ -124,7 +159,19 @@ impl X509CrlBuilder {
             });
         })
     }
-
+    /// Parses a DER-encoded CRL and constructs an `X509CrlBuilder` from it.
+    ///
+    /// This method extracts the TBS (To Be Signed) portion, signature algorithm, and signature value,
+    /// then parses the CRL fields including issuer, update times, and revoked certificates.
+    ///
+    /// # Arguments
+    ///
+    /// * `der` - A byte slice containing the DER-encoded CRL.
+    /// * `signer` - The certificate that signed the CRL.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the reconstructed `X509CrlBuilder` or an error if parsing fails.
     pub fn from_der(der: &[u8], signer: Certificate) -> Result<Self, Box<dyn std::error::Error>> {
         let (tbs_der, _sig_algo_oid, _sig_value) = yasna::parse_der(der, |reader| {
             reader.read_sequence(|reader| {
