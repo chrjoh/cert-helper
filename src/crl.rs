@@ -167,7 +167,7 @@ impl X509CrlBuilder {
     /// # Arguments
     ///
     /// * `der` - A byte slice containing the DER-encoded CRL.
-    /// * `signer` - The certificate that signed the CRL.
+    /// * `signer` - The certificate that will be used to sign the CRL.
     ///
     /// # Returns
     ///
