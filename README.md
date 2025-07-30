@@ -124,7 +124,7 @@ match verify_cert(&cert_3.x509, &cert_1.x509, vec![&cert_2.x509]) {
 use cert_helper::certificate::{CertBuilder, UseesBuilderFields};
 use cert_helper::crl::X509CrlBuilder;
 use chrono::Utc;
-use num_bigint::ToBigUint;
+use num_bigint::BigUint;
 
 let ca = CertBuilder::new()
    .common_name("My Test Ca")
@@ -132,7 +132,12 @@ let ca = CertBuilder::new()
    .build_and_self_sign()
    .unwrap();
 let mut builder = X509CrlBuilder::new(ca);
-builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now());
+
+let revocked = CertBuilder::new()
+    .common_name("My Test")
+    .build_and_self_sign()
+    .unwrap();
+builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
 
 let crl_der = builder.build_and_sign();
 

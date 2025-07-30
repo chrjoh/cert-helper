@@ -114,7 +114,7 @@
 //! use cert_helper::certificate::{CertBuilder, UseesBuilderFields};
 //! use cert_helper::crl::X509CrlBuilder;
 //! use chrono::Utc;
-//! use num_bigint::ToBigUint;
+//!use num_bigint::BigUint;
 //!
 //! let ca = CertBuilder::new()
 //!    .common_name("My Test Ca")
@@ -122,7 +122,13 @@
 //!    .build_and_self_sign()
 //!    .unwrap();
 //! let mut builder = X509CrlBuilder::new(ca);
-//! builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now());
+//!     let revocked = CertBuilder::new()
+//!    .common_name("My Test")
+//!    .build_and_self_sign()
+//!    .unwrap();
+//!
+//! let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
+//! builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
 //!
 //! let crl_der = builder.build_and_sign();
 //!
