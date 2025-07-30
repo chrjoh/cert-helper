@@ -4,6 +4,8 @@
 
 A lightweight wrapper around the OpenSSL crate for working with X.509 certificates and private keys.
 
+The package has not been reviewed for any security issues and is intended for testing purposes only.
+
 This library provides a set of utility functions to simplify common tasks such as:
 
 - Creating self-signed or CA-signed certificates
@@ -13,6 +15,8 @@ This library provides a set of utility functions to simplify common tasks such a
 - Reading and writing certificates, keys, and CSRs in PEM format
 - Validating certificate chains and properties
 - Create or update certificate revocation list(crl)
+  - Note that this is a simple crl parser that only handle the fields that are included then
+    generating a crl with this code
 
 ### Certificate Signing Requirements
 
