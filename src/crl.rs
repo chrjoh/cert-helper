@@ -10,6 +10,7 @@ use openssl::x509::X509;
 use std::error::Error;
 use x509_parser::asn1_rs::AsTaggedImplicit;
 use yasna::models::ObjectIdentifier;
+use yasna::tags::{TAG_BITSTRING, TAG_GENERALIZEDTIME, TAG_SEQUENCE};
 use yasna::{ASN1Error, ASN1ErrorKind, BERReader, DERWriter, Tag, TagClass};
 
 pub struct X509CrlBuilder {
@@ -119,7 +120,7 @@ impl X509CrlBuilder {
                 // Signature Value
                 writer
                     .next()
-                    .write_tagged_implicit(TAG_BIT_STRING, |writer| {
+                    .write_tagged_implicit(TAG_BITSTRING, |writer| {
                         // First byte is the number of unused bits (0 in this case)
                         let mut bit_string = vec![0u8];
                         bit_string.extend_from_slice(&signature);
@@ -160,14 +161,9 @@ impl X509CrlBuilder {
                         Ok(())
                     })?;
 
-                    let tag_sequence = Tag {
-                        tag_class: TagClass::Universal,
-                        tag_number: 16,
-                    };
-
                     let issuer_name = reader.next().read_sequence(|reader| {
                         reader.next().read_set(|set_reader| {
-                            set_reader.next(&[tag_sequence])?.read_sequence(|reader| {
+                            set_reader.next(&[TAG_SEQUENCE])?.read_sequence(|reader| {
                                 let _ = reader.next().read_oid()?;
                                 reader.next().read_utf8string()
                             })
@@ -209,19 +205,9 @@ impl X509CrlBuilder {
     }
 }
 
-const TAG_BIT_STRING: yasna::Tag = yasna::Tag {
-    tag_class: yasna::TagClass::Universal,
-    tag_number: 3,
-};
-
-const TAG_GENERALIZED_TIME: Tag = Tag {
-    tag_class: yasna::TagClass::Universal,
-    tag_number: 24,
-};
-
 fn write_generalized_time(writer: yasna::DERWriter, time: &chrono::DateTime<chrono::Utc>) {
     let time_str = time.format("%Y%m%d%H%M%SZ").to_string();
-    writer.write_tagged_implicit(TAG_GENERALIZED_TIME, |writer| {
+    writer.write_tagged_implicit(TAG_GENERALIZEDTIME, |writer| {
         writer.write_bytes(time_str.as_bytes());
     });
 }
@@ -230,7 +216,7 @@ fn read_generalized_time(
     reader: yasna::BERReader,
 ) -> Result<DateTime<Utc>, Box<dyn std::error::Error>> {
     reader
-        .read_tagged_implicit(TAG_GENERALIZED_TIME, |reader| {
+        .read_tagged_implicit(TAG_GENERALIZEDTIME, |reader| {
             let bytes = reader.read_bytes()?;
             let s =
                 std::str::from_utf8(&bytes).map_err(|_| ASN1Error::new(ASN1ErrorKind::Invalid))?;
