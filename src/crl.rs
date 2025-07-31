@@ -12,18 +12,28 @@ use yasna::models::ObjectIdentifier;
 use yasna::tags::{TAG_BITSTRING, TAG_GENERALIZEDTIME, TAG_UTCTIME};
 use yasna::{ASN1Error, ASN1ErrorKind, Tag};
 
-/// CRL Reason Codes with DER encoding and OID
+/// Represents the reason why a certificate was revoked, as defined in RFC 5280.
 #[derive(Debug, PartialEq)]
 pub enum CrlReason {
+    /// The reason for revocation is unspecified.
     Unspecified,
+    /// The certificate's private key is suspected to be compromised.
     KeyCompromise,
+    /// The certificate authority (CA) that issued the certificate is suspected to be compromised.
     CaCompromise,
+    /// The subject's affiliation has changed (e.g., job change, department change).
     AffiliationChanged,
+    /// The certificate has been superseded by a new one.
     Superseded,
+    /// The certificate is no longer needed due to cessation of operation.
     CessationOfOperation,
+    /// The certificate is temporarily on hold and may be reinstated later.
     CertificateHold,
+    /// The certificate was previously on hold but is now removed from the CRL.
     RemoveFromCrl,
+    /// The privileges granted to the certificate holder have been withdrawn.
     PrivilegeWithdrawn,
+    /// The attribute authority associated with the certificate is suspected to be compromised.
     AaCompromise,
 }
 
