@@ -144,7 +144,7 @@ let revocked = CertBuilder::new()
     .build_and_self_sign()
     .unwrap();
 let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
-builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now(),vec![CrlReason::KeyCompromise]);
+builder.add_revoked_cert_with_reason(BigUint::from_bytes_be(&bytes), Utc::now(),vec![CrlReason::KeyCompromise]);
 
 let crl_der = builder.build_and_sign();
 // to save crl as pem use the helper function

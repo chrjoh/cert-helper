@@ -121,8 +121,21 @@ impl X509CrlBuilder {
     ///
     /// * `serial` - The serial number of the revoked certificate.
     /// * `revocation_date` - The date and time when the certificate was revoked.
+    pub fn add_revoked_cert(&mut self, serial: BigUint, revocation_date: DateTime<Utc>) {
+        self.revoked.push(RevokedCert {
+            serial,
+            revocation_date,
+            reasons: Vec::new(),
+        });
+    }
+    /// Adds a revoked certificate to the CRL.
+    ///
+    /// # Arguments
+    ///
+    /// * `serial` - The serial number of the revoked certificate.
+    /// * `revocation_date` - The date and time when the certificate was revoked.
     /// * `crl_reasons` - A list of reasons explaining why the certificate was revoked.
-    pub fn add_revoked_cert(
+    pub fn add_revoked_cert_with_reason(
         &mut self,
         serial: BigUint,
         revocation_date: DateTime<Utc>,
@@ -503,7 +516,7 @@ mod tests {
         let mut builder = X509CrlBuilder::new(cert);
         let serial = BigUint::from(123u32);
         let date = Utc::now();
-        builder.add_revoked_cert(serial.clone(), date, Vec::new());
+        builder.add_revoked_cert(serial.clone(), date);
         assert_eq!(builder.revoked.len(), 1);
         assert_eq!(builder.revoked[0].serial, serial);
     }
@@ -536,7 +549,7 @@ mod tests {
         // Add a revoked certificate
         let serial = BigUint::from(456u32);
         let revocation_date = Utc::now();
-        builder.add_revoked_cert(serial.clone(), revocation_date, Vec::new());
+        builder.add_revoked_cert(serial.clone(), revocation_date);
 
         // Build and sign the CRL
         let crl_der = builder.build_and_sign();
@@ -570,7 +583,7 @@ mod tests {
             .build_and_self_sign()
             .unwrap();
         let mut builder = X509CrlBuilder::new(ca);
-        builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now(), Vec::new());
+        builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now());
 
         let crl_der = builder.build_and_sign();
 

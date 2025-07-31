@@ -12,7 +12,7 @@ fn main() {
         .build_and_self_sign()
         .unwrap();
     let mut builder = X509CrlBuilder::new(ca);
-    builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now(), Vec::new());
+    builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now());
 
     let crl_der = builder.build_and_sign();
     // write result as simple der file
@@ -34,7 +34,7 @@ fn main() {
     } else {
         X509CrlBuilder::new(ca)
     };
-    builder.add_revoked_cert(
+    builder.add_revoked_cert_with_reason(
         BigUint::from_bytes_be(&bytes),
         Utc::now(),
         vec![CrlReason::KeyCompromise],
