@@ -9,8 +9,79 @@ use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::Path;
 use yasna::models::ObjectIdentifier;
-use yasna::tags::{TAG_BITSTRING, TAG_GENERALIZEDTIME, TAG_SEQUENCE};
-use yasna::{ASN1Error, ASN1ErrorKind};
+use yasna::tags::{TAG_BITSTRING, TAG_GENERALIZEDTIME, TAG_UTCTIME};
+use yasna::{ASN1Error, ASN1ErrorKind, Tag};
+
+/// Represents the reason why a certificate was revoked, as defined in RFC 5280.
+#[derive(Debug, PartialEq)]
+pub enum CrlReason {
+    /// The reason for revocation is unspecified.
+    Unspecified,
+    /// The certificate's private key is suspected to be compromised.
+    KeyCompromise,
+    /// The certificate authority (CA) that issued the certificate is suspected to be compromised.
+    CaCompromise,
+    /// The subject's affiliation has changed (e.g., job change, department change).
+    AffiliationChanged,
+    /// The certificate has been superseded by a new one.
+    Superseded,
+    /// The certificate is no longer needed due to cessation of operation.
+    CessationOfOperation,
+    /// The certificate is temporarily on hold and may be reinstated later.
+    CertificateHold,
+    /// The certificate was previously on hold but is now removed from the CRL.
+    RemoveFromCrl,
+    /// The privileges granted to the certificate holder have been withdrawn.
+    PrivilegeWithdrawn,
+    /// The attribute authority associated with the certificate is suspected to be compromised.
+    AaCompromise,
+}
+
+impl CrlReason {
+    /// Returns the DER-encoded value for the reason
+    pub fn value(&self) -> Vec<u8> {
+        match self {
+            CrlReason::Unspecified => vec![0x0A, 0x01, 0x00],
+            CrlReason::KeyCompromise => vec![0x0A, 0x01, 0x01],
+            CrlReason::CaCompromise => vec![0x0A, 0x01, 0x02],
+            CrlReason::AffiliationChanged => vec![0x0A, 0x01, 0x03],
+            CrlReason::Superseded => vec![0x0A, 0x01, 0x04],
+            CrlReason::CessationOfOperation => vec![0x0A, 0x01, 0x05],
+            CrlReason::CertificateHold => vec![0x0A, 0x01, 0x06],
+            CrlReason::RemoveFromCrl => vec![0x0A, 0x01, 0x08],
+            CrlReason::PrivilegeWithdrawn => vec![0x0A, 0x01, 0x09],
+            CrlReason::AaCompromise => vec![0x0A, 0x01, 0x0A],
+        }
+    }
+
+    /// Returns the full OID for the reason (e.g., 2.5.29.21)
+    pub fn oid(&self) -> ObjectIdentifier {
+        ObjectIdentifier::from_slice(&[2, 5, 29, 21])
+    }
+
+    /// Return `CrlReason` for the corresponding value
+    pub fn from_oid_and_value(oid: &ObjectIdentifier, value: &[u8]) -> Option<Self> {
+        // Check that the OID is 2.5.29.21
+        if oid.components().as_slice() != [2, 5, 29, 21] {
+            return None;
+        }
+
+        // Match the DER-encoded ENUMERATED value
+        match value {
+            [0x0A, 0x01, 0x00] => Some(CrlReason::Unspecified),
+            [0x0A, 0x01, 0x01] => Some(CrlReason::KeyCompromise),
+            [0x0A, 0x01, 0x02] => Some(CrlReason::CaCompromise),
+            [0x0A, 0x01, 0x03] => Some(CrlReason::AffiliationChanged),
+            [0x0A, 0x01, 0x04] => Some(CrlReason::Superseded),
+            [0x0A, 0x01, 0x05] => Some(CrlReason::CessationOfOperation),
+            [0x0A, 0x01, 0x06] => Some(CrlReason::CertificateHold),
+            [0x0A, 0x01, 0x08] => Some(CrlReason::RemoveFromCrl),
+            [0x0A, 0x01, 0x09] => Some(CrlReason::PrivilegeWithdrawn),
+            [0x0A, 0x01, 0x0A] => Some(CrlReason::AaCompromise),
+            _ => None,
+        }
+    }
+}
 
 /// Represents a builder for creating and signing X.509 Certificate Revocation Lists (CRLs).
 ///
@@ -28,11 +99,14 @@ pub struct X509CrlBuilder {
 }
 
 /// Represents a single revoked certificate entry in a CRL.
+#[derive(Debug)]
 pub struct RevokedCert {
     /// The serial number of the revoked certificate.
     serial: BigUint,
     /// The date and time when the certificate was revoked.
     revocation_date: DateTime<Utc>,
+    // CRL reason
+    reasons: Vec<CrlReason>,
 }
 
 impl X509CrlBuilder {
@@ -61,6 +135,26 @@ impl X509CrlBuilder {
         self.revoked.push(RevokedCert {
             serial,
             revocation_date,
+            reasons: Vec::new(),
+        });
+    }
+    /// Adds a revoked certificate to the CRL.
+    ///
+    /// # Arguments
+    ///
+    /// * `serial` - The serial number of the revoked certificate.
+    /// * `revocation_date` - The date and time when the certificate was revoked.
+    /// * `crl_reasons` - A list of reasons explaining why the certificate was revoked.
+    pub fn add_revoked_cert_with_reason(
+        &mut self,
+        serial: BigUint,
+        revocation_date: DateTime<Utc>,
+        crl_reasons: Vec<CrlReason>,
+    ) {
+        self.revoked.push(RevokedCert {
+            serial,
+            revocation_date,
+            reasons: crl_reasons,
         });
     }
     /// Sets the `this_update` and `next_update` timestamps for the CRL.
@@ -111,7 +205,6 @@ impl X509CrlBuilder {
                 });
 
                 // thisUpdate and nextUpdate
-
                 write_generalized_time(writer.next(), &self.this_update);
                 write_generalized_time(writer.next(), &self.next_update);
 
@@ -123,6 +216,17 @@ impl X509CrlBuilder {
                                 .next()
                                 .write_bigint_bytes(&revoked.serial.to_bytes_be(), true);
                             write_generalized_time(writer.next(), &revoked.revocation_date);
+
+                            if revoked.reasons.len() > 0 {
+                                writer.next().write_sequence_of(|writer| {
+                                    for reason in &revoked.reasons {
+                                        writer.next().write_sequence(|writer| {
+                                            writer.next().write_oid(&reason.oid());
+                                            writer.next().write_bytes(&reason.value());
+                                        });
+                                    }
+                                });
+                            }
                         });
                     }
                 });
@@ -207,37 +311,73 @@ impl X509CrlBuilder {
                         Ok(())
                     })?;
 
-                    let issuer_name = reader.next().read_sequence(|reader| {
-                        reader.next().read_set(|set_reader| {
-                            set_reader.next(&[TAG_SEQUENCE])?.read_sequence(|reader| {
-                                let _ = reader.next().read_oid()?;
-                                reader.next().read_utf8string()
-                            })
-                        })
-                    })?;
+                    //       let issuer_name = reader.next().read_sequence(|reader| {
+                    //           reader.next().read_set(|set_reader| {
+                    //               set_reader.next(&[TAG_SEQUENCE])?.read_sequence(|reader| {
+                    //                   let _ = reader.next().read_oid()?;
+                    //                   reader.next().read_utf8string()
+                    //               })
+                    //           })
+                    //       })?;
+                    // skip all issuer data
+                    let _issuer = reader.next().read_der()?;
 
-                    let this_update = read_generalized_time(reader.next());
-                    let next_update = read_generalized_time(reader.next());
+                    let this_update = read_time(reader.next());
+                    let next_update = read_time(reader.next());
 
                     let mut revoked: Vec<RevokedCert> = Vec::new();
 
                     // Handle optional revokedCertificates field
                     let revoked_reader = reader.next();
                     let _ = revoked_reader.read_sequence_of(|reader| {
-                        let (serial, revocation_date) = reader.read_sequence(|reader| {
-                            let (serial_bytes, _is_negative) = reader.next().read_bigint_bytes()?;
-                            let revocation_date = read_generalized_time(reader.next());
-                            Ok((serial_bytes, revocation_date))
-                        })?;
+                        let (serial, revocation_date, reasons) =
+                            reader.read_sequence(|reader| {
+                                let (serial_bytes, _is_negative) =
+                                    reader.next().read_bigint_bytes()?;
+                                let revocation_date = read_time(reader.next());
+
+                                // Read optional extensions
+                                let mut reasons: Vec<CrlReason> = Vec::new();
+                                let _extensions = reader.read_optional(|reader| {
+                                    reader.read_sequence_of(|reader| {
+                                        reader.read_sequence(|reader| {
+                                            let oid = reader.next().read_oid()?;
+                                            let value = reader.next().read_bytes()?;
+                                            if let Some(crl_reason) =
+                                                CrlReason::from_oid_and_value(&oid, &value)
+                                            {
+                                                reasons.push(crl_reason);
+                                            }
+                                            Ok(())
+                                        })
+                                    })
+                                })?;
+
+                                Ok((serial_bytes, revocation_date, reasons))
+                            })?;
 
                         revoked.push(RevokedCert {
                             serial: BigUint::from_bytes_be(&serial),
                             revocation_date: revocation_date.unwrap(),
+                            reasons: reasons,
                         });
                         Ok(())
                     });
 
-                    Ok((issuer_name, this_update, next_update, revoked))
+                    let _extensions = reader.read_optional(|reader| {
+                        reader.read_tagged(Tag::context(0), |reader| {
+                            reader.read_sequence_of(|reader| {
+                                reader.read_sequence(|reader| {
+                                    // Skip over the OID, critical flag (optional), and value
+                                    let _oid = reader.next().read_oid();
+                                    let _critical = reader.read_optional(|r| r.read_der())?;
+                                    let _value = reader.next().read_bytes();
+                                    Ok(())
+                                })
+                            })
+                        })
+                    })?;
+                    Ok((_issuer, this_update, next_update, revoked))
                 })
             })
             .map_err(|e| format!("ASN.1 parse error: {}", e))?;
@@ -308,23 +448,28 @@ fn write_generalized_time(writer: yasna::DERWriter, time: &chrono::DateTime<chro
     });
 }
 
-fn read_generalized_time(
-    reader: yasna::BERReader,
-) -> Result<DateTime<Utc>, Box<dyn std::error::Error>> {
-    reader
-        .read_tagged_implicit(TAG_GENERALIZEDTIME, |reader| {
-            let bytes = reader.read_bytes()?;
-            let s =
-                std::str::from_utf8(&bytes).map_err(|_| ASN1Error::new(ASN1ErrorKind::Invalid))?;
+fn read_time(reader: yasna::BERReader) -> Result<DateTime<Utc>, Box<dyn std::error::Error>> {
+    let parse_time = |reader: yasna::BERReader, format: &str| -> Result<DateTime<Utc>, ASN1Error> {
+        let bytes = reader.read_bytes()?;
+        let s = std::str::from_utf8(&bytes).map_err(|_| ASN1Error::new(ASN1ErrorKind::Invalid))?;
+        let naive = NaiveDateTime::parse_from_str(s, format)
+            .map_err(|_| ASN1Error::new(ASN1ErrorKind::Invalid))?;
+        Ok(Utc.from_utc_datetime(&naive))
+    };
 
-            // Parse format like "20250729141655Z"
+    let tag = reader
+        .lookahead_tag()
+        .map_err(|e| format!("Failed to look ahead tag: {:?}", e))?;
 
-            //let s = s.trim_end_matches('Z');
-            let naive = NaiveDateTime::parse_from_str(s, "%Y%m%d%H%M%SZ")
-                .map_err(|_| ASN1Error::new(ASN1ErrorKind::Invalid))?;
-            Ok(Utc.from_utc_datetime(&naive))
-        })
-        .map_err(|e| format!("Failed to read GeneralizedTime: {}", e).into())
+    match tag {
+        TAG_GENERALIZEDTIME => reader
+            .read_tagged_implicit(TAG_GENERALIZEDTIME, |r| parse_time(r, "%Y%m%d%H%M%SZ"))
+            .map_err(|e| format!("Failed to read GeneralizedTime: {:?}", e).into()),
+        TAG_UTCTIME => reader
+            .read_tagged_implicit(TAG_UTCTIME, |r| parse_time(r, "%y%m%d%H%M%SZ"))
+            .map_err(|e| format!("Failed to read UTCTime: {:?}", e).into()),
+        _ => Err("Invalid ASN.1 time format".into()),
+    }
 }
 
 fn signature_algorithm_oid(name: &str) -> Option<&'static [u64]> {
@@ -460,5 +605,47 @@ mod tests {
         let file_path = dir.path().join(file_name);
         let pem_contents = fs::read_to_string(file_path).unwrap();
         assert!(pem_contents.contains("-----BEGIN X509 CRL-----"));
+    }
+
+    #[test]
+    fn test_crl_contains_reason_code_extension() {
+        // Setup: create a CRL with one revoked certificate and a reason
+        let crl = X509CrlBuilder {
+            signer: dummy_certificate(), // You need to implement or mock this
+            this_update: Utc::now(),
+            next_update: Utc::now() + chrono::Duration::days(30),
+            revoked: vec![RevokedCert {
+                serial: BigUint::from(123u32),
+                revocation_date: Utc::now(),
+                reasons: vec![CrlReason::KeyCompromise],
+            }],
+        };
+
+        let der = crl.build_and_sign();
+
+        // Decode the CRL and check it is valid
+        let result = yasna::parse_der(&der, |reader| {
+            reader.read_sequence(|reader| {
+                let _tbs_der = reader.next().read_der()?;
+
+                // Signature Algorithm
+                let _sig_algo_oid = reader.next().read_sequence(|reader| {
+                    let oid = reader.next().read_oid()?;
+                    let _ = reader.next().read_null()?;
+                    Ok(oid)
+                })?;
+
+                // Signature Value
+                let _sig_value = reader.next().read_bitvec_bytes()?;
+                Ok(())
+            })
+        });
+
+        assert!(result.is_ok(), "CRL should be valid DER");
+
+        // Parse the CRL back
+        let parsed =
+            X509CrlBuilder::from_der(&der, dummy_certificate()).expect("Failed to parse DER");
+        assert_eq!(parsed.revoked[0].reasons[0], CrlReason::KeyCompromise);
     }
 }
