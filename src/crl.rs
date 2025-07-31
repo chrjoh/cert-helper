@@ -12,7 +12,7 @@ use yasna::models::ObjectIdentifier;
 use yasna::tags::{TAG_BITSTRING, TAG_GENERALIZEDTIME, TAG_UTCTIME};
 use yasna::{ASN1Error, ASN1ErrorKind, Tag};
 
-/// CRL Reason Codes with DER encoding and full OID
+/// CRL Reason Codes with DER encoding and OID
 #[derive(Debug, PartialEq)]
 pub enum CrlReason {
     Unspecified,
@@ -49,6 +49,7 @@ impl CrlReason {
         ObjectIdentifier::from_slice(&[2, 5, 29, 21])
     }
 
+    /// Return `CrlReason` for the corresponding value
     pub fn from_oid_and_value(oid: &ObjectIdentifier, value: &[u8]) -> Option<Self> {
         // Check that the OID is 2.5.29.21
         if oid.components().as_slice() != [2, 5, 29, 21] {
@@ -119,6 +120,7 @@ impl X509CrlBuilder {
     ///
     /// * `serial` - The serial number of the revoked certificate.
     /// * `revocation_date` - The date and time when the certificate was revoked.
+    /// * `crl_reasons` - A list of reasons explaining why the certificate was revoked.
     pub fn add_revoked_cert(
         &mut self,
         serial: BigUint,
@@ -310,7 +312,7 @@ impl X509CrlBuilder {
                                     reader.next().read_bigint_bytes()?;
                                 let revocation_date = read_time(reader.next());
 
-                                // Read optional extensions and ignore them
+                                // Read optional extensions
                                 let mut reasons: Vec<CrlReason> = Vec::new();
                                 let _extensions = reader.read_optional(|reader| {
                                     reader.read_sequence_of(|reader| {
