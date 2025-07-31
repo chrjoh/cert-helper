@@ -34,7 +34,7 @@ These constraints ensure that the certificate is recognized as a valid CA and ca
 - Validating certificate chains in custom TLS setups
 - Creating CSRs to be signed by external or internal CAs
 - Issuing signed certificates from CSRs for controlled certificate management
-- Create crl for testing how a client handle certificate revocations
+- Create crl for testing how a client handle certificate revocations, optionally add crl reason for the revoked certificate.
 
 ## Basic Example creating a certificate and private key
 
@@ -123,6 +123,8 @@ match verify_cert(&cert_3.x509, &cert_1.x509, vec![&cert_2.x509]) {
 ```
 
 ## Example on how to create a certifcate revocation list(clr)
+
+Create a crl, with one revoked certificate that have CRL Reason: Key Compromise
 
 ```rust
 use cert_helper::certificate::{CertBuilder, UseesBuilderFields};

@@ -30,7 +30,7 @@
 //! - Validating certificate chains in custom TLS setups
 //! - Creating CSRs to be signed by external or internal CAs
 //! - Issuing signed certificates from CSRs for controlled certificate management
-//! - Create crl for testing how a client handle certificate revocations
+//! - Create crl for testing how a client handle certificate revocations, optionally add crl reason for the revoked certificate
 //!
 //!
 //! ## Basic Example creating a certificate and private key
@@ -114,6 +114,9 @@
 //! ```
 //!
 //! ## Example on how to create a certifcate revocation list(clr)
+//!
+//! Create a crl, with one revoked certificate that have CRL Reason: Key Compromise
+//!
 //! ```rust
 //! use cert_helper::certificate::{CertBuilder, UseesBuilderFields};
 //! use cert_helper::crl::{X509CrlBuilder,CrlReason};
@@ -132,7 +135,9 @@
 //!    .unwrap();
 //!
 //! let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
-//! builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now(),vec![CrlReason::KeyCompromise],);
+//! builder.add_revoked_cert(BigUint::from_bytes_be(&bytes),
+//!                          Utc::now(),
+//!                          vec![CrlReason::KeyCompromise]);
 //!
 //! let crl_der = builder.build_and_sign();
 //! // to save crl as pem use the helper function

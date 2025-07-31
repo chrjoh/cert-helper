@@ -16,8 +16,7 @@ fn main() {
 
     let crl_der = builder.build_and_sign();
     // write result as simple der file
-    std::fs::write("crl.der", crl_der).unwrap();
-    //write_der_crl_as_pem(&crl_der, "./certs", "crl1.pem").expect("failed to save crl as pem file");
+    std::fs::write("./certs/crl.der", crl_der).unwrap();
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
         .is_ca(true)
@@ -30,7 +29,7 @@ fn main() {
 
     let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
 
-    let mut builder = if let Ok(existing) = fs::read("crl.der") {
+    let mut builder = if let Ok(existing) = fs::read("./certs/crl.der") {
         X509CrlBuilder::from_der(&existing, ca).expect("failed to get crl from file")
     } else {
         X509CrlBuilder::new(ca)
@@ -38,7 +37,7 @@ fn main() {
     builder.add_revoked_cert(
         BigUint::from_bytes_be(&bytes),
         Utc::now(),
-        vec![CrlReason::CaCompromise],
+        vec![CrlReason::KeyCompromise],
     );
     builder.set_update_times(Utc::now(), Utc::now() + chrono::Duration::days(30));
 
