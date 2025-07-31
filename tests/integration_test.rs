@@ -337,7 +337,7 @@ fn test_creating_crl_with_revocked_certificate() {
         .unwrap();
     let mut builder = X509CrlBuilder::new(ca);
     let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
-    builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
+    builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now(), Vec::new());
     let crl_der = builder.build_and_sign();
     assert!(!crl_der.is_empty());
 }

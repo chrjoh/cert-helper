@@ -1,5 +1,5 @@
 use cert_helper::certificate::{CertBuilder, UseesBuilderFields};
-use cert_helper::crl::{X509CrlBuilder, write_der_crl_as_pem};
+use cert_helper::crl::{CrlReason, X509CrlBuilder, write_der_crl_as_pem};
 use chrono::Utc;
 use num_bigint::{BigUint, ToBigUint};
 
@@ -12,11 +12,12 @@ fn main() {
         .build_and_self_sign()
         .unwrap();
     let mut builder = X509CrlBuilder::new(ca);
-    builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now());
+    builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now(), Vec::new());
 
     let crl_der = builder.build_and_sign();
     // write result as simple der file
     std::fs::write("crl.der", crl_der).unwrap();
+    //write_der_crl_as_pem(&crl_der, "./certs", "crl1.pem").expect("failed to save crl as pem file");
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
         .is_ca(true)
@@ -34,7 +35,11 @@ fn main() {
     } else {
         X509CrlBuilder::new(ca)
     };
-    builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
+    builder.add_revoked_cert(
+        BigUint::from_bytes_be(&bytes),
+        Utc::now(),
+        vec![CrlReason::CaCompromise],
+    );
     builder.set_update_times(Utc::now(), Utc::now() + chrono::Duration::days(30));
 
     let crl_der = builder.build_and_sign();

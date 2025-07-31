@@ -116,7 +116,7 @@
 //! ## Example on how to create a certifcate revocation list(clr)
 //! ```rust
 //! use cert_helper::certificate::{CertBuilder, UseesBuilderFields};
-//! use cert_helper::crl::X509CrlBuilder;
+//! use cert_helper::crl::{X509CrlBuilder,CrlReason};
 //! use chrono::Utc;
 //! use num_bigint::BigUint;
 //!
@@ -132,7 +132,7 @@
 //!    .unwrap();
 //!
 //! let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
-//! builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
+//! builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now(),vec![CrlReason::KeyCompromise],);
 //!
 //! let crl_der = builder.build_and_sign();
 //! // to save crl as pem use the helper function
