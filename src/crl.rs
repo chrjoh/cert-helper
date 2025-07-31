@@ -89,6 +89,7 @@ pub struct X509CrlBuilder {
 }
 
 /// Represents a single revoked certificate entry in a CRL.
+#[derive(Debug)]
 pub struct RevokedCert {
     /// The serial number of the revoked certificate.
     serial: BigUint,
