@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "cert-helper"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "bit-vec",
  "chrono",
