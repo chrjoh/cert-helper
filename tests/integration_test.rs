@@ -8,6 +8,8 @@ use num_bigint::BigUint;
 use openssl::nid::Nid;
 use openssl::x509::X509;
 use std::collections::HashSet;
+use std::fs;
+use std::path::PathBuf;
 
 #[test]
 fn create_minimal_self_signed_cert() -> Result<(), Box<dyn std::error::Error>> {
@@ -322,6 +324,20 @@ fn test_no_multiple_key_usages() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(count_key_usage_extension_fields(&cert.x509), 1);
     Ok(())
+}
+
+#[test]
+fn test_parse_crl_from_der() {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .build_and_self_sign()
+        .unwrap();
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("tests/fixtures/rfc5280_CRL.crl");
+    let der = fs::read(path).unwrap();
+    let builder = X509CrlBuilder::from_der(&der, ca);
+    assert!(builder.is_ok());
 }
 
 #[test]
