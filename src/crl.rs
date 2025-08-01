@@ -109,6 +109,23 @@ pub struct RevokedCert {
     reasons: Vec<CrlReason>,
 }
 
+impl RevokedCert {
+    /// Returns the serial number of the revoked certificate.
+    pub fn serial(&self) -> &BigUint {
+        &self.serial
+    }
+
+    /// Returns the date and time when the certificate was revoked.
+    pub fn revocation_date(&self) -> &DateTime<Utc> {
+        &self.revocation_date
+    }
+
+    /// Returns the list of revocation reasons associated with the certificate.
+    pub fn reasons(&self) -> &[CrlReason] {
+        &self.reasons
+    }
+}
+
 impl X509CrlBuilder {
     /// Creates a new `X509CrlBuilder` with the given signer certificate.
     ///

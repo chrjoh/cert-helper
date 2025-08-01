@@ -2,7 +2,7 @@ use cert_helper::certificate::{
     CertBuilder, CsrBuilder, CsrOptions, HashAlg, KeyType, Usage, UseesBuilderFields,
     create_cert_chain_from_cert_list, verify_cert,
 };
-use cert_helper::crl::X509CrlBuilder;
+use cert_helper::crl::{CrlReason, X509CrlBuilder};
 use chrono::Utc;
 use num_bigint::BigUint;
 use openssl::nid::Nid;
@@ -338,7 +338,10 @@ fn test_parse_crl_from_der() {
     let der = fs::read(path).unwrap();
     let builder = X509CrlBuilder::from_der(&der, ca);
     assert!(builder.is_ok());
-    assert_eq!(builder.unwrap().revoked().len(), 1);
+    let crl = builder.unwrap();
+    assert_eq!(crl.revoked().len(), 1);
+    assert_eq!(crl.revoked()[0].reasons().len(), 1);
+    assert_eq!(crl.revoked()[0].reasons()[0], CrlReason::KeyCompromise);
 }
 
 #[test]
