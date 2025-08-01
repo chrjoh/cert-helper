@@ -125,6 +125,17 @@ impl X509CrlBuilder {
             next_update: Utc::now() + chrono::Duration::days(30),
         }
     }
+
+    /// Returns a read-only slice of the revoked certificates included in the CRL.
+    ///
+    /// This method provides access to the list of `RevokedCert` entries that have been
+    /// added to the CRL builder. Each entry contains the serial number, revocation date,
+    /// and associated revocation reasons for a certificate that has been revoked.
+    ///
+    pub fn revoked(&self) -> &[RevokedCert] {
+        &self.revoked
+    }
+
     /// Adds a revoked certificate to the CRL.
     ///
     /// # Arguments

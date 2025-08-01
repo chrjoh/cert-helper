@@ -338,6 +338,7 @@ fn test_parse_crl_from_der() {
     let der = fs::read(path).unwrap();
     let builder = X509CrlBuilder::from_der(&der, ca);
     assert!(builder.is_ok());
+    assert_eq!(builder.unwrap().revoked().len(), 1);
 }
 
 #[test]
