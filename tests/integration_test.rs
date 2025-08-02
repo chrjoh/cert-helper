@@ -1,5 +1,5 @@
 use cert_helper::certificate::{
-    CertBuilder, CsrBuilder, CsrOptions, HashAlg, KeyType, Usage, UseesBuilderFields,
+    CertBuilder, Certificate, CsrBuilder, CsrOptions, HashAlg, KeyType, Usage, UseesBuilderFields,
     create_cert_chain_from_cert_list, verify_cert,
 };
 use cert_helper::crl::{CrlReason, X509CrlBuilder};
@@ -105,6 +105,16 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
     );
 
     Ok(())
+}
+
+#[test]
+fn test_reading_cert_creatded_by_openssl() {
+    let mut cert_pem_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    cert_pem_file.push("tests/fixtures/cert.pem");
+    let mut key_pem_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    key_pem_file.push("tests/fixtures/key.pem");
+    let cert = Certificate::load_cert_and_key(cert_pem_file, key_pem_file);
+    assert!(cert.is_ok());
 }
 
 #[test]
