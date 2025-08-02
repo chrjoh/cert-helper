@@ -334,7 +334,7 @@ impl X509CrlBuilder {
         let (_issuer_name, this_update, next_update, revoked) =
             yasna::parse_der(&tbs_der, |reader| {
                 reader.read_sequence(|reader| {
-                    let _version = reader.next().read_u8()?;
+                    let _version = reader.read_optional(|reader| reader.read_u8());
 
                     let _ = reader.next().read_sequence(|reader| {
                         let _ = reader.next().read_oid()?;
