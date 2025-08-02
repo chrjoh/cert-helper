@@ -95,7 +95,7 @@ pub struct X509CrlBuilder {
     /// The timestamp indicating when the CRL was generated.
     this_update: DateTime<Utc>,
     /// The timestamp indicating when the next CRL will be issued.
-    next_update: DateTime<Utc>,
+    next_update: Option<DateTime<Utc>>,
 }
 
 /// Represents a single revoked certificate entry in a CRL.
@@ -139,7 +139,7 @@ impl X509CrlBuilder {
             signer,
             revoked: Vec::new(),
             this_update: Utc::now(),
-            next_update: Utc::now() + chrono::Duration::days(30),
+            next_update: Some(Utc::now() + chrono::Duration::days(30)),
         }
     }
 
@@ -193,7 +193,7 @@ impl X509CrlBuilder {
     /// * `next_update` - The time when the next CRL is expected to be issued.
     pub fn set_update_times(&mut self, this_update: DateTime<Utc>, next_update: DateTime<Utc>) {
         self.this_update = this_update;
-        self.next_update = next_update;
+        self.next_update = Some(next_update);
     }
     /// Builds and signs the CRL, returning the DER-encoded byte vector.
     ///
@@ -234,7 +234,10 @@ impl X509CrlBuilder {
 
                 // thisUpdate and nextUpdate
                 write_generalized_time(writer.next(), &self.this_update);
-                write_generalized_time(writer.next(), &self.next_update);
+
+                if let Some(ref next_update) = self.next_update {
+                    write_generalized_time(writer.next(), next_update);
+                }
 
                 // Revoked Certificates
                 writer.next().write_sequence_of(|writer| {
@@ -351,7 +354,11 @@ impl X509CrlBuilder {
                     let _issuer = reader.next().read_der()?;
 
                     let this_update = read_time(reader.next());
-                    let next_update = read_time(reader.next());
+
+                    let next_update = reader.read_optional(|reader| {
+                        read_time(reader)
+                            .map_err(|_| yasna::ASN1Error::new(yasna::ASN1ErrorKind::Invalid))
+                    });
 
                     let mut revoked: Vec<RevokedCert> = Vec::new();
 
@@ -413,7 +420,7 @@ impl X509CrlBuilder {
         Ok(Self {
             signer,
             this_update: this_update.unwrap(),
-            next_update: next_update.unwrap(),
+            next_update: next_update.ok().unwrap(),
             revoked,
         })
     }
@@ -567,7 +574,7 @@ mod tests {
         let next_update = this_update + Duration::days(10);
         builder.set_update_times(this_update, next_update);
         assert_eq!(builder.this_update, this_update);
-        assert_eq!(builder.next_update, next_update);
+        assert_eq!(builder.next_update, Some(next_update));
     }
 
     #[test]
@@ -636,12 +643,31 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_crl_without_next_update_time() {
+        let crl = X509CrlBuilder {
+            signer: dummy_certificate(), // You need to implement or mock this
+            this_update: Utc::now(),
+            next_update: None,
+            revoked: vec![RevokedCert {
+                serial: BigUint::from(123u32),
+                revocation_date: Utc::now(),
+                reasons: vec![CrlReason::KeyCompromise],
+            }],
+        };
+        let der = crl.build_and_sign();
+        assert!(der.len() > 0);
+        let parsed =
+            X509CrlBuilder::from_der(&der, dummy_certificate()).expect("Failed to parse DER");
+        assert_eq!(parsed.next_update, None);
+    }
+
+    #[test]
     fn test_crl_contains_reason_code_extension() {
         // Setup: create a CRL with one revoked certificate and a reason
         let crl = X509CrlBuilder {
             signer: dummy_certificate(), // You need to implement or mock this
             this_update: Utc::now(),
-            next_update: Utc::now() + chrono::Duration::days(30),
+            next_update: Some(Utc::now() + chrono::Duration::days(30)),
             revoked: vec![RevokedCert {
                 serial: BigUint::from(123u32),
                 revocation_date: Utc::now(),
