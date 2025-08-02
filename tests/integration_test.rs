@@ -372,6 +372,25 @@ fn test_creating_crl_with_revocked_certificate() {
     assert!(!crl_der.is_empty());
 }
 
+#[test]
+fn test_creating_and_parse_crl_with_no_revocked_certificates() {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .build_and_self_sign()
+        .unwrap();
+    let builder = X509CrlBuilder::new(ca);
+    let crl_der = builder.build_and_sign();
+    assert!(!crl_der.is_empty());
+
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .build_and_self_sign()
+        .unwrap();
+    let parsed = X509CrlBuilder::from_der(&crl_der, ca);
+    assert!(parsed.is_ok());
+}
 fn get_clean_subject_name(x509: &X509) -> Option<String> {
     let subject_name = x509.subject_name();
     if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next() {
