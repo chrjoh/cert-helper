@@ -1,8 +1,13 @@
 //! # Cert-Helper
 //!
+//! A lightweight helper library for managing X.509 certificates using OpenSSL.
+//! Provides convenient tools for generating Certificate Signing Requests (CSRs),
+//! Certificate Revocation Lists (CRLs), and handling private keys.
+//!
 //! ## Description
 //!
-//! A lightweight wrapper around the OpenSSL crate for working with X.509 certificates and private keys.
+//! A minimal wrapper combining `openssl`, `yasna`, and `x509-parser` crates
+//! to simplify common certificate operations such as creation, signing, parsing, and revocation.
 //!
 //! The package has not been reviewed for any security issues and is intended for testing purposes only.
 //!
