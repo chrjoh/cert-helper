@@ -313,6 +313,12 @@ fn create_signed_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>
         cert.x509.issuer_name().to_der().unwrap(),
         root_cert.x509.subject_name().to_der().unwrap()
     );
+    assert!(&cert.x509.subject_key_id().is_some());
+    assert!(&cert.x509.authority_key_id().is_some());
+    assert_eq!(
+        cert.x509.authority_key_id().unwrap().as_slice(),
+        root_cert.x509.subject_key_id().unwrap().as_slice()
+    );
     Ok(())
 }
 

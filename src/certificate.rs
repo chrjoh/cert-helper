@@ -369,6 +369,22 @@ impl Csr {
             serial.to_asn1_integer()?
         };
         builder.set_serial_number(&serial_number)?;
+        if signer.x509.subject_key_id().is_some() {
+            let aki = AuthorityKeyIdentifier::new()
+                .keyid(true)
+                .issuer(false)
+                .build(&builder.x509v3_context(Some(&signer.x509), None))?;
+            builder.append_extension(aki)?;
+        }
+        let oid = Asn1Object::from_str("2.5.29.14")?; // OID för Subject Key Identifier (SKI)
+        let pubkey_der = self.csr.public_key().unwrap().public_key_to_der()?;
+        let ski_hash = hash(MessageDigest::sha1(), &pubkey_der)?;
+        let der_encoded = yasna::construct_der(|writer| {
+            writer.write_bytes(ski_hash.as_ref());
+        });
+        let ski_asn1 = Asn1OctetString::new_from_bytes(&der_encoded)?;
+        let ext = X509Extension::new_from_der(oid.as_ref(), false, &ski_asn1)?;
+        builder.append_extension(ext)?;
         builder.sign(signer.pkey.as_ref().unwrap(), MessageDigest::sha256())?;
         let cert = builder.build();
 

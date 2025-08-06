@@ -98,6 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .alternative_names(vec!["ca.com", "www.ca.com"])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
     let root_cert = ca.build_and_self_sign()?;
+    root_cert.save("./certs", "ca_new_cert_from_csr")?;
     let options = CsrOptions::new().is_ca(true);
 
     let new_cert_from_csr = csr.build_signed_certificate(&root_cert, options)?;
