@@ -9,6 +9,7 @@ use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::Path;
 use yasna::models::ObjectIdentifier;
+use yasna::tags;
 use yasna::tags::{TAG_BITSTRING, TAG_GENERALIZEDTIME, TAG_UTCTIME};
 use yasna::{ASN1Error, ASN1ErrorKind, Tag};
 
@@ -261,6 +262,33 @@ impl X509CrlBuilder {
                         });
                     }
                 });
+                if self.signer.x509.subject_key_id().is_some() {
+                    let key_id = self.signer.x509.subject_key_id().unwrap();
+                    let aki_oid = ObjectIdentifier::from_slice(&[2, 5, 29, 35]);
+
+                    let aki_value_der = yasna::construct_der(|writer| {
+                        writer.write_sequence(|writer| {
+                            writer
+                                .next()
+                                .write_tagged_implicit(Tag::context(0), |writer| {
+                                    writer.write_bytes(key_id.as_slice());
+                                });
+                        });
+                    });
+
+                    let extension_der = yasna::construct_der(|writer| {
+                        writer.write_sequence(|writer| {
+                            writer.next().write_oid(&aki_oid);
+                            writer.next().write_bytes(&aki_value_der);
+                        });
+                    });
+
+                    writer.next().write_tagged(Tag::context(0), |writer| {
+                        writer.write_sequence_of(|writer| {
+                            writer.next().write_der(&extension_der);
+                        });
+                    });
+                }
             });
         });
 
@@ -405,7 +433,14 @@ impl X509CrlBuilder {
                                 reader.read_sequence(|reader| {
                                     // Skip over the OID, critical flag (optional), and value
                                     let _oid = reader.next().read_oid();
-                                    let _critical = reader.read_optional(|r| r.read_der())?;
+                                    let _critical = reader.read_optional(|reader| match reader
+                                        .lookahead_tag()?
+                                    {
+                                        tag if tag == Tag::from(tags::TAG_BOOLEAN) => {
+                                            reader.read_bool().map(Some)
+                                        }
+                                        _ => Ok(None),
+                                    })?;
                                     let _value = reader.next().read_bytes();
                                     Ok(())
                                 })
