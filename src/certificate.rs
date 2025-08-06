@@ -1,19 +1,21 @@
 use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
 use openssl::asn1::Asn1Time;
+use openssl::asn1::{Asn1Object, Asn1OctetString};
 use openssl::bn::BigNum;
 use openssl::ec::{EcGroup, EcKey};
 use openssl::error::ErrorStack;
-use openssl::hash::MessageDigest;
+use openssl::hash::{MessageDigest, hash};
 use openssl::nid::Nid;
 use openssl::pkey::{PKey, Private};
 use openssl::rsa::Rsa;
 use openssl::stack::Stack;
 use openssl::x509::X509Req;
 use openssl::x509::extension::{
-    BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
+    AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
 };
 use openssl::x509::{
-    X509, X509Builder, X509NameBuilder, X509ReqBuilder, X509StoreContext, store::X509StoreBuilder,
+    X509, X509Builder, X509Extension, X509NameBuilder, X509ReqBuilder, X509StoreContext,
+    store::X509StoreBuilder,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, create_dir_all};
@@ -751,9 +753,50 @@ impl CertBuilder {
             builder.append_extension(
                 san.build(&builder.x509v3_context(Some(&signer_cert.x509), None))?,
             )?;
+            if signer_cert.x509.subject_key_id().is_some() {
+                let aki = AuthorityKeyIdentifier::new()
+                    .keyid(true)
+                    .issuer(false)
+                    .build(&builder.x509v3_context(Some(&signer_cert.x509), None))?;
+                builder.append_extension(aki)?;
+            }
         } else {
+            // add aki that is the same as ski for self signed
             builder.append_extension(san.build(&builder.x509v3_context(None, None))?)?;
+            let oid = Asn1Object::from_str("2.5.29.35")?; // OID för Authority Key Identifier (AKI)
+            let pubkey_der = pkey.public_key_to_der()?;
+            let aki_hash = hash(MessageDigest::sha1(), &pubkey_der)?;
+            let der_encoded = yasna::construct_der(|writer| {
+                writer.write_sequence(|writer| {
+                    writer
+                        .next()
+                        .write_tagged_implicit(yasna::Tag::context(0), |writer| {
+                            writer.write_bytes(aki_hash.as_ref());
+                        })
+                })
+            });
+            let aki_asn1 = Asn1OctetString::new_from_bytes(&der_encoded)?;
+            let ext = X509Extension::new_from_der(oid.as_ref(), false, &aki_asn1)?;
+            builder.append_extension(ext)?;
         }
+        // tried
+        // let ski = SubjectKeyIdentifier::new().build(&builder.x509v3_context(None, None))?;
+        // but got miss/match in hash values so I calculate the ski explicitly with sha1
+        // to verify with openssl cli
+        // RSA:
+        // openssl x509 -in mytestca_cert.pem -inform PEM -pubkey -noout | openssl rsa -pubin -outform DER | openssl dgst -c -sha1
+        // EC:
+        // openssl x509 -in mytestca_cert.pem -inform PEM -pubkey -noout| openssl pkey -pubin -outform DER| openssl dgst -c -sha1
+        let oid = Asn1Object::from_str("2.5.29.14")?; // OID för Subject Key Identifier (SKI)
+        let pubkey_der = pkey.public_key_to_der()?;
+        let ski_hash = hash(MessageDigest::sha1(), &pubkey_der)?;
+        let der_encoded = yasna::construct_der(|writer| {
+            writer.write_bytes(ski_hash.as_ref());
+        });
+        let ski_asn1 = Asn1OctetString::new_from_bytes(&der_encoded)?;
+        let ext = X509Extension::new_from_der(oid.as_ref(), false, &ski_asn1)?;
+        builder.append_extension(ext)?;
+
         Ok((builder, pkey))
     }
 }

@@ -5,6 +5,8 @@ use cert_helper::certificate::{
 use cert_helper::crl::{CrlReason, X509CrlBuilder};
 use chrono::Utc;
 use num_bigint::BigUint;
+use openssl::hash::MessageDigest;
+use openssl::hash::hash;
 use openssl::nid::Nid;
 use openssl::x509::X509;
 use std::collections::HashSet;
@@ -103,6 +105,17 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
         pubkey.ec_key()?.public_key_to_der().ok(),
         root_cert.pkey.unwrap().public_key_to_der().ok()
     );
+    let actual_ski = x509.subject_key_id().expect("SKI should be present");
+
+    let pubkey = x509.public_key()?;
+    let pubkey_der = pubkey.public_key_to_der()?;
+    let expected_ski = hash(MessageDigest::sha1(), &pubkey_der)?;
+
+    assert_eq!(actual_ski.as_slice(), expected_ski.as_ref());
+    assert_eq!(
+        x509.authority_key_id().unwrap().as_slice(),
+        x509.subject_key_id().unwrap().as_slice()
+    );
 
     Ok(())
 }
@@ -147,7 +160,12 @@ fn test_create_signed_certificate() -> Result<(), Box<dyn std::error::Error>> {
         middle_cert.x509.issuer_name().to_der().unwrap(),
         root_cert.x509.subject_name().to_der().unwrap()
     );
-
+    assert!(&middle_cert.x509.subject_key_id().is_some());
+    assert!(&middle_cert.x509.authority_key_id().is_some());
+    assert_eq!(
+        middle_cert.x509.authority_key_id().unwrap().as_slice(),
+        root_cert.x509.subject_key_id().unwrap().as_slice()
+    );
     Ok(())
 }
 
