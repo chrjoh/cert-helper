@@ -1,4 +1,4 @@
-use cert_helper::certificate::{CertBuilder, UseesBuilderFields};
+use cert_helper::certificate::{CertBuilder, UseesBuilderFields, X509Common};
 use cert_helper::crl::{CrlReason, X509CrlBuilder, write_der_crl_as_pem};
 use chrono::Utc;
 use num_bigint::{BigUint, ToBigUint};
@@ -26,7 +26,7 @@ fn main() {
         .common_name("My Test")
         .build_and_self_sign()
         .unwrap();
-
+    ca.save("./certs", "crl_signer").unwrap();
     let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
 
     let mut builder = if let Ok(existing) = fs::read("./certs/crl.der") {

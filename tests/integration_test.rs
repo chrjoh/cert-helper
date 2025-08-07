@@ -5,8 +5,10 @@ use cert_helper::certificate::{
 use cert_helper::crl::{CrlReason, X509CrlBuilder};
 use chrono::Utc;
 use num_bigint::BigUint;
+use openssl::hash::MessageDigest;
+use openssl::hash::hash;
 use openssl::nid::Nid;
-use openssl::x509::X509;
+use openssl::x509::{X509, X509Crl};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -103,6 +105,17 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
         pubkey.ec_key()?.public_key_to_der().ok(),
         root_cert.pkey.unwrap().public_key_to_der().ok()
     );
+    let actual_ski = x509.subject_key_id().expect("SKI should be present");
+
+    let pubkey = x509.public_key()?;
+    let pubkey_der = pubkey.public_key_to_der()?;
+    let expected_ski = hash(MessageDigest::sha1(), &pubkey_der)?;
+
+    assert_eq!(actual_ski.as_slice(), expected_ski.as_ref());
+    assert_eq!(
+        x509.authority_key_id().unwrap().as_slice(),
+        x509.subject_key_id().unwrap().as_slice()
+    );
 
     Ok(())
 }
@@ -147,7 +160,12 @@ fn test_create_signed_certificate() -> Result<(), Box<dyn std::error::Error>> {
         middle_cert.x509.issuer_name().to_der().unwrap(),
         root_cert.x509.subject_name().to_der().unwrap()
     );
-
+    assert!(&middle_cert.x509.subject_key_id().is_some());
+    assert!(&middle_cert.x509.authority_key_id().is_some());
+    assert_eq!(
+        middle_cert.x509.authority_key_id().unwrap().as_slice(),
+        root_cert.x509.subject_key_id().unwrap().as_slice()
+    );
     Ok(())
 }
 
@@ -295,6 +313,12 @@ fn create_signed_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>
         cert.x509.issuer_name().to_der().unwrap(),
         root_cert.x509.subject_name().to_der().unwrap()
     );
+    assert!(&cert.x509.subject_key_id().is_some());
+    assert!(&cert.x509.authority_key_id().is_some());
+    assert_eq!(
+        cert.x509.authority_key_id().unwrap().as_slice(),
+        root_cert.x509.subject_key_id().unwrap().as_slice()
+    );
     Ok(())
 }
 
@@ -365,11 +389,16 @@ fn test_creating_crl_with_revocked_certificate() {
         .common_name("My Test")
         .build_and_self_sign()
         .unwrap();
+    let public_key = ca.x509.public_key().clone();
     let mut builder = X509CrlBuilder::new(ca);
     let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
     builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
     let crl_der = builder.build_and_sign();
     assert!(!crl_der.is_empty());
+    // verify signature
+    let crl = X509Crl::from_der(crl_der.as_slice());
+    let result = crl.unwrap().verify(public_key.as_ref().unwrap());
+    assert_eq!(result.unwrap(), true);
 }
 
 #[test]
