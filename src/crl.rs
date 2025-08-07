@@ -264,7 +264,7 @@ impl X509CrlBuilder {
                 });
                 if self.signer.x509.subject_key_id().is_some() {
                     let key_id = self.signer.x509.subject_key_id().unwrap();
-                    let aki_oid = ObjectIdentifier::from_slice(&[2, 5, 29, 35]);
+                    let aki_oid = ObjectIdentifier::from_slice(&[2, 5, 29, 35]); // AKI
 
                     let aki_value_der = yasna::construct_der(|writer| {
                         writer.write_sequence(|writer| {
