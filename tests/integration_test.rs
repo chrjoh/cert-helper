@@ -398,7 +398,7 @@ fn test_creating_crl_with_revocked_certificate() {
     // verify signature
     let crl = X509Crl::from_der(crl_der.as_slice());
     let result = crl.unwrap().verify(public_key.as_ref().unwrap());
-    assert!(result.unwrap())
+    assert_eq!(result.unwrap(), true);
 }
 
 #[test]
