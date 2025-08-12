@@ -293,7 +293,7 @@ impl X509CrlBuilder {
             });
         });
 
-        // Sign the TBS
+        // Sign the TBS (To Be Signed)
         let signature: Vec<u8>;
         if self.signer.pkey.clone().unwrap().id() == Id::ED25519 {
             let mut signer =
