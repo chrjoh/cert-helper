@@ -1,35 +1,30 @@
 use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
-use openssl::asn1::Asn1Time;
-use openssl::asn1::{Asn1Object, Asn1OctetString};
+use foreign_types::ForeignType;
+use openssl::asn1::{Asn1Object, Asn1OctetString, Asn1Time};
 use openssl::bn::BigNum;
 use openssl::ec::{EcGroup, EcKey};
 use openssl::error::ErrorStack;
-
-use foreign_types::ForeignType;
-
 use openssl::hash::{MessageDigest, hash};
 use openssl::nid::Nid;
 use openssl::pkey::{Id, PKey, Private};
 use openssl::rsa::Rsa;
 use openssl::stack::Stack;
-use openssl::x509::X509Req;
 use openssl::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
 };
 use openssl::x509::{
-    X509, X509Builder, X509Extension, X509NameBuilder, X509ReqBuilder, X509StoreContext,
+    X509, X509Builder, X509Extension, X509NameBuilder, X509Req, X509ReqBuilder, X509StoreContext,
     store::X509StoreBuilder,
 };
-
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::Path;
-use x509_parser::prelude::FromDer;
 
 use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
+use x509_parser::prelude::FromDer;
 
 unsafe extern "C" {
     pub fn X509_sign(
