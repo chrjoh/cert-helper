@@ -14,7 +14,7 @@ The package has not been reviewed for any security issues and is intended for te
 This library provides a set of utility functions to simplify common tasks such as:
 
 - Creating self-signed or CA-signed certificates
-- Generating RSA/ECDSA private keys
+- Generating RSA, ECDSA,or Ed25519 private keys
 - Creating Certificate Signing Requests (CSRs)
 - Signing certificates from CSRs using a CA certificate and key
 - Reading and writing certificates, keys, and CSRs in PEM format
@@ -162,7 +162,7 @@ Values that can be selected for building a certificate
 | keyword | description | options |
 | ----------------- | --------------------------------------------------------------------------- | ----------------------------------- |
 | common_name | the common name this certificate shoud have, mandatory field | string: www.foo.se |
-| key_type | key type to be used, defaults to RSA2048 | enum: RSA2048, RSA4096, P224, P256, P384, P512 |
+| key_type | key type to be used, defaults to RSA2048 | enum: RSA2048, RSA4096, P224, P256, P384, P512, Ed25519 |
 | ca | is this certificate used to sign other certificates, default value is false | boolean: true or false |
 | country_name | the country code to use,must follow the standard defined by ISO 3166-1 alpha-2. | string: SE |
 | organization | organisation name | string: test |
