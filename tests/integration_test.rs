@@ -562,6 +562,18 @@ fn test_parse_crl_from_der() {
 }
 
 #[test]
+fn test_parse_crl_from_der_signed_with_key_ed25519() {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .key_type(KeyType::Ed25519)
+        .build_and_self_sign()
+        .unwrap();
+    let crl_der = X509CrlBuilder::new(ca.clone()).build_and_sign();
+    let builder = X509CrlBuilder::from_der(&crl_der, ca);
+    assert!(builder.is_ok());
+}
+#[test]
 fn test_creating_crl_with_revocked_certificate() {
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
@@ -583,7 +595,29 @@ fn test_creating_crl_with_revocked_certificate() {
     let result = crl.unwrap().verify(public_key.as_ref().unwrap());
     assert_eq!(result.unwrap(), true);
 }
-
+#[test]
+fn test_creating_crl_with_revocked_certificate_and_signer_key_ed25519() {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .key_type(KeyType::Ed25519)
+        .build_and_self_sign()
+        .unwrap();
+    let revocked = CertBuilder::new()
+        .common_name("My Test")
+        .build_and_self_sign()
+        .unwrap();
+    let public_key = ca.x509.public_key().clone();
+    let mut builder = X509CrlBuilder::new(ca);
+    let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
+    builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
+    let crl_der = builder.build_and_sign();
+    assert!(!crl_der.is_empty());
+    // verify signature
+    let crl = X509Crl::from_der(crl_der.as_slice());
+    let result = crl.unwrap().verify(public_key.as_ref().unwrap());
+    assert_eq!(result.unwrap(), true);
+}
 #[test]
 fn test_creating_and_parse_crl_with_no_revocked_certificates() {
     let ca = CertBuilder::new()

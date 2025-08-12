@@ -1,14 +1,18 @@
-use cert_helper::certificate::{CertBuilder, UseesBuilderFields, X509Common};
+use cert_helper::certificate::{CertBuilder, KeyType, UseesBuilderFields, X509Common};
 use cert_helper::crl::{CrlReason, X509CrlBuilder, write_der_crl_as_pem};
 use chrono::Utc;
 use num_bigint::{BigUint, ToBigUint};
 
 use std::fs;
-
+// view crl:
+//  openssl crl -in certs/crl_final.der -inform DER -text -noout
+// verify crl
+//  openssl crl -in certs/crl_final.der -inform DER -text -noout -CAfile  certs/crl_signer_cert.pem
 fn main() {
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
         .is_ca(true)
+        .key_type(KeyType::Ed25519)
         .build_and_self_sign()
         .unwrap();
     let mut builder = X509CrlBuilder::new(ca);
@@ -22,6 +26,7 @@ fn main() {
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
         .is_ca(true)
+        .key_type(KeyType::Ed25519)
         .build_and_self_sign()
         .unwrap();
     let revocked = CertBuilder::new()
@@ -45,5 +50,7 @@ fn main() {
 
     let crl_der = builder.build_and_sign();
     std::fs::write("./certs/crl_final.der", &crl_der).unwrap();
-    write_der_crl_as_pem(&crl_der, "./certs", "crl.pem").expect("failed to save crl as pem file");
+    write_der_crl_as_pem(&crl_der, "./certs", "crl_final.pem")
+        .expect("failed to save crl as pem file");
+    println!("Done");
 }
