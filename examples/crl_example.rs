@@ -16,7 +16,9 @@ fn main() {
 
     let crl_der = builder.build_and_sign();
     // write result as simple der file
-    std::fs::write("./certs/crl.der", crl_der).unwrap();
+    std::fs::write("./certs/crl.der", &crl_der).unwrap();
+    write_der_crl_as_pem(&crl_der, "./certs", "crl_first.pem")
+        .expect("failed to save crl as pem file");
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
         .is_ca(true)
@@ -42,5 +44,6 @@ fn main() {
     builder.set_update_times(Utc::now(), Utc::now() + chrono::Duration::days(30));
 
     let crl_der = builder.build_and_sign();
+    std::fs::write("./certs/crl_final.der", &crl_der).unwrap();
     write_der_crl_as_pem(&crl_der, "./certs", "crl.pem").expect("failed to save crl as pem file");
 }
