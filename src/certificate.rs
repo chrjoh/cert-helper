@@ -59,7 +59,7 @@ fn sign_certificate_ed25519(
 
     let result = unsafe { X509_sign(cert_ptr, pkey_ptr, std::ptr::null()) };
 
-    if result == 1 {
+    if result > 0 {
         Ok(())
     } else {
         Err("Failed to sign certificate with Ed25519".to_string())
@@ -76,7 +76,7 @@ fn sign_x509_req_ed25519(req: &X509Req, pkey: &PKey<Private>) -> Result<(), Stri
 
     let result = unsafe { X509_REQ_sign(req_ptr, pkey_ptr, std::ptr::null()) };
 
-    if result == 1 {
+    if result > 0 {
         Ok(())
     } else {
         Err("Failed to sign X509Req with Ed25519".to_string())
@@ -446,7 +446,8 @@ impl Csr {
         let cert: X509;
         if signer.pkey.clone().unwrap().id() == Id::ED25519 {
             let builder_cert = builder.build();
-            let _ = sign_certificate_ed25519(&builder_cert, signer.pkey.as_ref().unwrap());
+            sign_certificate_ed25519(&builder_cert, signer.pkey.as_ref().unwrap())
+                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
             cert = builder_cert;
         } else {
             builder.sign(signer.pkey.as_ref().unwrap(), MessageDigest::sha256())?;
@@ -737,7 +738,8 @@ impl CertBuilder {
         let ca_cert: X509;
         if pkey.id() == Id::ED25519 {
             let build_cert = builder.build();
-            let _ = sign_certificate_ed25519(&build_cert, &pkey);
+            sign_certificate_ed25519(&build_cert, &pkey)
+                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
             ca_cert = build_cert;
         } else {
             builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
@@ -767,7 +769,8 @@ impl CertBuilder {
         let cert: X509;
         if signer_key.id() == Id::ED25519 {
             let build_cert = builder.build();
-            let _ = sign_certificate_ed25519(&build_cert, &signer_key);
+            sign_certificate_ed25519(&build_cert, &signer_key)
+                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
             cert = build_cert;
         } else {
             builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
@@ -956,7 +959,8 @@ impl CsrBuilder {
         let csr: X509Req;
         if pkey.id() == Id::ED25519 {
             let builder_csr = builder.build();
-            let _ = sign_x509_req_ed25519(&builder_csr, &pkey);
+            sign_x509_req_ed25519(&builder_csr, &pkey)
+                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
             csr = builder_csr;
         } else {
             builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
