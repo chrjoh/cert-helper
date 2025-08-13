@@ -86,6 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let csr_builder = CsrBuilder::new()
         .common_name("example2.com")
         .country_name("SE")
+        .key_type(KeyType::Ed25519)
         .state_province("Stockholm")
         .organization("My org")
         .locality_time("Stockholm")

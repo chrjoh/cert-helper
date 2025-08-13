@@ -13,7 +13,7 @@
 //!
 //! This library provides a set of utility functions to simplify common tasks such as:
 //! - Creating self-signed or CA-signed certificates
-//! - Generating RSA, ECDSA,or Ed25519 private keys
+//! - Generating RSA, ECDSA,or Ed25519 private keys, note that Ed25519 do not require any hash variant
 //! - Creating Certificate Signing Requests (CSRs)
 //! - Signing certificates from CSRs using a CA certificate and key
 //! - Reading and writing certificates, keys, and CSRs in PEM format
