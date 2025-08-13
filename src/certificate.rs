@@ -1,31 +1,82 @@
 use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
-use openssl::asn1::Asn1Time;
-use openssl::asn1::{Asn1Object, Asn1OctetString};
+use foreign_types::ForeignType;
+use openssl::asn1::{Asn1Object, Asn1OctetString, Asn1Time};
 use openssl::bn::BigNum;
 use openssl::ec::{EcGroup, EcKey};
 use openssl::error::ErrorStack;
 use openssl::hash::{MessageDigest, hash};
 use openssl::nid::Nid;
-use openssl::pkey::{PKey, Private};
+use openssl::pkey::{Id, PKey, Private};
 use openssl::rsa::Rsa;
 use openssl::stack::Stack;
-use openssl::x509::X509Req;
 use openssl::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
 };
 use openssl::x509::{
-    X509, X509Builder, X509Extension, X509NameBuilder, X509ReqBuilder, X509StoreContext,
+    X509, X509Builder, X509Extension, X509NameBuilder, X509Req, X509ReqBuilder, X509StoreContext,
     store::X509StoreBuilder,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::Path;
-use x509_parser::prelude::FromDer;
 
 use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
+use x509_parser::prelude::FromDer;
+
+unsafe extern "C" {
+    pub fn X509_sign(
+        x: *mut openssl_sys::X509,
+        pkey: *mut openssl_sys::EVP_PKEY,
+        md: *const openssl_sys::EVP_MD,
+    ) -> ::std::os::raw::c_int;
+}
+
+unsafe extern "C" {
+    pub fn X509_REQ_sign(
+        req: *mut openssl_sys::X509_REQ,
+        pkey: *mut openssl_sys::EVP_PKEY,
+        md: *const openssl_sys::EVP_MD,
+    ) -> ::std::os::raw::c_int;
+}
+
+fn sign_certificate_ed25519(
+    cert: &X509,
+    pkey: &PKey<openssl::pkey::Private>,
+) -> Result<(), String> {
+    if pkey.id() != Id::ED25519 {
+        return Err("sign_certificate_ed25519 called with non-Ed25519 key".to_string());
+    }
+    let cert_ptr = cert.as_ptr();
+    let pkey_ptr = pkey.as_ptr();
+
+    let result = unsafe { X509_sign(cert_ptr, pkey_ptr, std::ptr::null()) };
+
+    if result > 0 {
+        Ok(())
+    } else {
+        Err("Failed to sign certificate with Ed25519".to_string())
+    }
+}
+
+fn sign_x509_req_ed25519(req: &X509Req, pkey: &PKey<Private>) -> Result<(), String> {
+    if pkey.id() != Id::ED25519 {
+        return Err("sign_x509_req_ed25519 called with non-Ed25519 key".to_string());
+    }
+
+    let req_ptr = req.as_ptr();
+    let pkey_ptr = pkey.as_ptr();
+
+    let result = unsafe { X509_REQ_sign(req_ptr, pkey_ptr, std::ptr::null()) };
+
+    if result > 0 {
+        Ok(())
+    } else {
+        Err("Failed to sign X509Req with Ed25519".to_string())
+    }
+}
 
 macro_rules! vec_str_to_hs {
     ($vec:expr) => {
@@ -35,7 +86,7 @@ macro_rules! vec_str_to_hs {
     };
 }
 /// Defines what type of key that can be used with the certificate
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum KeyType {
     /// RSA key with a 2048-bit length.
     RSA2048,
@@ -49,6 +100,8 @@ pub enum KeyType {
     P384,
     /// Elliptic Curve key using the NIST P-521 curve (secp521r1).
     P521,
+    /// Edwards-curve Digital Signature Algorithm using Ed25519.
+    Ed25519,
 }
 /// Defines which hash algorithm to be used in certificate signing
 #[derive(Debug, Clone)]
@@ -385,8 +438,16 @@ impl Csr {
         let ski_asn1 = Asn1OctetString::new_from_bytes(&der_encoded)?;
         let ext = X509Extension::new_from_der(oid.as_ref(), false, &ski_asn1)?;
         builder.append_extension(ext)?;
-        builder.sign(signer.pkey.as_ref().unwrap(), MessageDigest::sha256())?;
-        let cert = builder.build();
+        let cert: X509;
+        if signer.pkey.clone().unwrap().id() == Id::ED25519 {
+            let builder_cert = builder.build();
+            sign_certificate_ed25519(&builder_cert, signer.pkey.as_ref().unwrap())
+                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
+            cert = builder_cert;
+        } else {
+            builder.sign(signer.pkey.as_ref().unwrap(), MessageDigest::sha256())?;
+            cert = builder.build();
+        }
 
         Ok(Certificate {
             x509: cert,
@@ -669,8 +730,16 @@ impl CertBuilder {
     /// create a self signed x509 certificate and private key
     pub fn build_and_self_sign(&self) -> Result<Certificate, Box<dyn std::error::Error>> {
         let (mut builder, pkey) = self.prepare_x509_builder(None)?;
-        builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
-        let ca_cert = builder.build();
+        let ca_cert: X509;
+        if pkey.id() == Id::ED25519 {
+            let build_cert = builder.build();
+            sign_certificate_ed25519(&build_cert, &pkey)
+                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
+            ca_cert = build_cert;
+        } else {
+            builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
+            ca_cert = builder.build();
+        }
 
         Ok(Certificate {
             x509: ca_cert,
@@ -692,8 +761,16 @@ impl CertBuilder {
         }
         let (mut builder, pkey) = self.prepare_x509_builder(Some(&signer))?;
         let signer_key = signer.pkey.as_ref().unwrap();
-        builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
-        let cert = builder.build();
+        let cert: X509;
+        if signer_key.id() == Id::ED25519 {
+            let build_cert = builder.build();
+            sign_certificate_ed25519(&build_cert, &signer_key)
+                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
+            cert = build_cert;
+        } else {
+            builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
+            cert = builder.build();
+        }
         Ok(Certificate {
             x509: cert,
             pkey: Some(pkey),
@@ -874,8 +951,16 @@ impl CsrBuilder {
         extensions.push(san.build(&builder.x509v3_context(None))?)?;
 
         builder.add_extensions(&extensions)?;
-        builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
-        let csr = builder.build();
+        let csr: X509Req;
+        if pkey.id() == Id::ED25519 {
+            let builder_csr = builder.build();
+            sign_x509_req_ed25519(&builder_csr, &pkey)
+                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
+            csr = builder_csr;
+        } else {
+            builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
+            csr = builder.build();
+        }
         Ok(Csr {
             csr,
             pkey: Some(pkey),
@@ -1074,6 +1159,7 @@ fn select_key(key_type: &Option<KeyType>) -> Result<PKey<Private>, ErrorStack> {
             let ec_key = EcKey::generate(&group)?;
             PKey::from_ec_key(ec_key)
         }
+        Some(KeyType::Ed25519) => PKey::generate_ed25519(),
         Some(KeyType::RSA4096) => {
             let rsa = Rsa::generate(4096)?;
             PKey::from_rsa(rsa)

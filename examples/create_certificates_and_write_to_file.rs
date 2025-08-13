@@ -18,7 +18,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .organization("my org")
         .locality_time("Stockholm")
         .is_ca(true)
-        .key_type(KeyType::P521)
+        .key_type(KeyType::Ed25519)
+        .signature_alg(HashAlg::SHA512)
+        .alternative_names(vec!["ca.com", "www.ca.com"])
+        .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
+    let root_cert = ca.build_and_self_sign()?;
+    root_cert.save("./certs/", "ed_ca")?;
+
+    println!("Generating CA certificate and key...");
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .country_name("SE")
+        .state_province("Stockholm")
+        .organization("my org")
+        .locality_time("Stockholm")
+        .is_ca(true)
+        .key_type(KeyType::Ed25519)
         .signature_alg(HashAlg::SHA512)
         .alternative_names(vec!["ca.com", "www.ca.com"])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
@@ -60,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     let leaf_cert = leaf.build_and_sign(&middle_cert)?;
     leaf_cert.save("./certs/", "example2.com")?;
-
+    std::fs::write("./certs/leaf_cert.der", leaf_cert.x509.to_der().unwrap()).unwrap();
     println!("All certificates and keys have been generated.");
     match verify_cert(&leaf_cert.x509, &ca_cert.x509, vec![&middle_cert.x509]) {
         Ok(true) => println!("verify ok"),
@@ -71,6 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let csr_builder = CsrBuilder::new()
         .common_name("example2.com")
         .country_name("SE")
+        .key_type(KeyType::Ed25519)
         .state_province("Stockholm")
         .organization("My org")
         .locality_time("Stockholm")

@@ -3,8 +3,8 @@ use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use num_bigint::BigUint;
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
-use openssl::x509::X509;
-use openssl::x509::X509Crl;
+use openssl::pkey::Id;
+use openssl::x509::{X509, X509Crl};
 use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::Path;
@@ -292,12 +292,22 @@ impl X509CrlBuilder {
             });
         });
 
-        // Sign the TBS
-        let mut signer =
-            openssl::sign::Signer::new(MessageDigest::sha256(), self.signer.pkey.as_ref().unwrap())
-                .unwrap();
-        signer.update(&tbs).unwrap();
-        let signature = signer.sign_to_vec().unwrap();
+        // Sign the TBS (To Be Signed)
+        let signature: Vec<u8>;
+        if self.signer.pkey.clone().unwrap().id() == Id::ED25519 {
+            let mut signer =
+                openssl::sign::Signer::new_without_digest(self.signer.pkey.as_ref().unwrap())
+                    .unwrap();
+            signature = signer.sign_oneshot_to_vec(&tbs).unwrap();
+        } else {
+            let mut signer = openssl::sign::Signer::new(
+                MessageDigest::sha256(),
+                self.signer.pkey.as_ref().unwrap(),
+            )
+            .unwrap();
+            signer.update(&tbs).unwrap();
+            signature = signer.sign_to_vec().unwrap();
+        }
 
         // Final CRL
         yasna::construct_der(|writer| {
@@ -552,6 +562,7 @@ fn signature_algorithm_oid(name: &str) -> Option<&'static [u64]> {
         "ecdsa-with-SHA256" => Some(&[1, 2, 840, 10045, 4, 3, 2]),
         "ecdsa-with-SHA384" => Some(&[1, 2, 840, 10045, 4, 3, 3]),
         "ecdsa-with-SHA512" => Some(&[1, 2, 840, 10045, 4, 3, 4]),
+        "ED25519" => Some(&[1, 3, 101, 112]),
         _ => None,
     }
 }
