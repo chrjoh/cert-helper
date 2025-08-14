@@ -1,5 +1,5 @@
 use cert_helper::certificate::{CertBuilder, KeyType, UseesBuilderFields, X509Common};
-use cert_helper::crl::{CrlReason, X509CrlBuilder, write_der_crl_as_pem};
+use cert_helper::crl::{CrlReason, X509CrlBuilder, X509CrlWrapper, write_der_crl_as_pem};
 use chrono::Utc;
 use num_bigint::{BigUint, ToBigUint};
 
@@ -37,9 +37,9 @@ fn main() {
     let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
 
     let mut builder = if let Ok(existing) = fs::read("./certs/crl.der") {
-        X509CrlBuilder::from_der(&existing, ca).expect("failed to get crl from file")
+        X509CrlBuilder::from_der(&existing, ca.clone()).expect("failed to get crl from file")
     } else {
-        X509CrlBuilder::new(ca)
+        X509CrlBuilder::new(ca.clone())
     };
     builder.add_revoked_cert_with_reason(
         BigUint::from_bytes_be(&bytes),
@@ -52,5 +52,12 @@ fn main() {
     std::fs::write("./certs/crl_final.der", &crl_der).unwrap();
     write_der_crl_as_pem(&crl_der, "./certs", "crl_final.pem")
         .expect("failed to save crl as pem file");
+
+    println!("Test X509Wrapper");
+    let wrapper = X509CrlWrapper::read_as_pem("./certs/crl_final.pem").unwrap();
+    let verify = wrapper.verify_signature(ca.x509.public_key().as_ref().unwrap());
+    assert!(verify.unwrap());
+    let is_revoked = wrapper.revoked(revocked.x509.serial_number());
+    assert!(is_revoked);
     println!("Done");
 }

@@ -124,7 +124,7 @@
 //!
 //! ```rust
 //! use cert_helper::certificate::{CertBuilder, UseesBuilderFields};
-//! use cert_helper::crl::{X509CrlBuilder,CrlReason};
+//! use cert_helper::crl::{X509CrlBuilder,CrlReason,X509CrlWrapper};
 //! use chrono::Utc;
 //! use num_bigint::BigUint;
 //!
@@ -133,7 +133,7 @@
 //!    .is_ca(true)
 //!    .build_and_self_sign()
 //!    .unwrap();
-//! let mut builder = X509CrlBuilder::new(ca);
+//! let mut builder = X509CrlBuilder::new(ca.clone());
 //!     let revocked = CertBuilder::new()
 //!    .common_name("My Test")
 //!    .build_and_self_sign()
@@ -148,6 +148,12 @@
 //! // to save crl as pem use the helper function
 //! // write_der_crl_as_pem(&crl_der, "./certs", "crl.pem").expect("failed to save crl as pem file");
 //!
+//! // use the wrapper to check sign, revocations
+//! let crl_wrapper = X509CrlWrapper::from_der(crl_der.as_slice()).unwrap();
+//! let result = crl_wrapper.verify_signature(ca.x509.public_key().as_ref().unwrap());
+//! assert!(result.unwrap());
+//! let is_revoked = crl_wrapper.revoked(revocked.x509.serial_number());
+//! assert!(is_revoked);
 //! ```
 //!
 //! ## Config

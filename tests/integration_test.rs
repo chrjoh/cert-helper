@@ -2,7 +2,7 @@ use cert_helper::certificate::{
     CertBuilder, Certificate, CsrBuilder, CsrOptions, HashAlg, KeyType, Usage, UseesBuilderFields,
     create_cert_chain_from_cert_list, verify_cert,
 };
-use cert_helper::crl::{CrlReason, X509CrlBuilder};
+use cert_helper::crl::{CrlReason, X509CrlBuilder, X509CrlWrapper};
 use chrono::Utc;
 use num_bigint::BigUint;
 use openssl::hash::MessageDigest;
@@ -595,6 +595,48 @@ fn test_creating_crl_with_revocked_certificate() {
     let result = crl.unwrap().verify(public_key.as_ref().unwrap());
     assert_eq!(result.unwrap(), true);
 }
+#[test]
+fn test_clr_wrapper() {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .build_and_self_sign()
+        .unwrap();
+    let revocked_one = CertBuilder::new()
+        .common_name("My Test")
+        .build_and_self_sign()
+        .unwrap();
+    let revocked_two = CertBuilder::new()
+        .common_name("My Test")
+        .build_and_self_sign()
+        .unwrap();
+    let public_key = ca.x509.public_key().clone();
+    let revoked_serial_to_check = revocked_one.x509.serial_number();
+    let mut builder = X509CrlBuilder::new(ca.clone());
+
+    let bytes = revocked_one.x509.serial_number().to_bn().unwrap().to_vec();
+    builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
+    let bytes = revocked_two.x509.serial_number().to_bn().unwrap().to_vec();
+    builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
+
+    let crl_der = builder.build_and_sign();
+    assert!(!crl_der.is_empty());
+    let crl_wrapper = X509CrlWrapper::from_der(crl_der.as_slice()).unwrap();
+    // verify signature
+    let result = crl_wrapper.verify_signature(public_key.as_ref().unwrap());
+    assert_eq!(result.unwrap(), true);
+    // check that certifificate is revoked
+    let mut is_revoked = crl_wrapper.revoked(revoked_serial_to_check);
+    assert_eq!(is_revoked, true);
+    // check that non revoked is not found
+    let not_revocked = CertBuilder::new()
+        .common_name("My Test")
+        .build_and_self_sign()
+        .unwrap();
+    is_revoked = crl_wrapper.revoked(not_revocked.x509.serial_number());
+    assert_eq!(is_revoked, false);
+}
+
 #[test]
 fn test_creating_crl_with_revocked_certificate_and_signer_key_ed25519() {
     let ca = CertBuilder::new()

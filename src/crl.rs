@@ -1,9 +1,11 @@
 use crate::certificate::Certificate;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use num_bigint::BigUint;
+use openssl::asn1::Asn1IntegerRef;
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
 use openssl::pkey::Id;
+use openssl::pkey::{PKey, Public};
 use openssl::x509::{X509, X509Crl};
 use std::fs::{File, create_dir_all};
 use std::io::Write;
@@ -80,6 +82,68 @@ impl CrlReason {
             [0x0A, 0x01, 0x09] => Some(CrlReason::PrivilegeWithdrawn),
             [0x0A, 0x01, 0x0A] => Some(CrlReason::AaCompromise),
             _ => None,
+        }
+    }
+}
+
+pub struct X509CrlWrapper {
+    crl: X509Crl,
+}
+
+impl X509CrlWrapper {
+    pub fn from_der(crl_der: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        match X509Crl::from_der(crl_der) {
+            Ok(data) => Ok(Self { crl: data }),
+            Err(e) => Err(e.into()),
+        }
+    }
+    pub fn verify_signature(
+        &self,
+        public_key: &PKey<Public>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        match self.crl.verify(public_key) {
+            Ok(result) => Ok(result),
+            Err(e) => Err(e.into()),
+        }
+    }
+    pub fn to_der(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        match self.crl.to_der() {
+            Ok(data) => Ok(data),
+            Err(e) => Err(e.into()),
+        }
+    }
+    pub fn revoked(&self, serial: &Asn1IntegerRef) -> bool {
+        if let Some(revoked) = self.crl.get_revoked() {
+            revoked.into_iter().any(|r| r.serial_number() == serial)
+        } else {
+            false
+        }
+    }
+    pub fn save_as_pem<P: AsRef<Path>, F: AsRef<Path>>(
+        &self,
+        path: P,
+        filename: F,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        create_dir_all(&path)?;
+        let os_file = filename
+            .as_ref()
+            .file_name()
+            .ok_or("Failed to extract file name")?;
+        let full_path = path.as_ref().join(os_file);
+        let mut file = File::create(full_path)?;
+
+        let pem_data = self.crl.to_pem()?;
+        file.write_all(&pem_data)?;
+
+        Ok(())
+    }
+    pub fn read_as_pem<F: AsRef<Path>>(
+        crl_pem_file: F,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let crl_pem = std::fs::read(crl_pem_file)?;
+        match X509Crl::from_pem(crl_pem.as_slice()) {
+            Ok(crl) => Ok(Self { crl }),
+            Err(e) => Err(e.into()),
         }
     }
 }
@@ -583,6 +647,7 @@ mod tests {
     use crate::certificate::{CertBuilder, Certificate, UseesBuilderFields};
     use chrono::{Duration, Utc};
     use num_bigint::{BigUint, ToBigUint};
+    use openssl::asn1::Asn1Integer;
     use std::fs;
     use tempfile::tempdir;
 
@@ -592,6 +657,21 @@ mod tests {
             .is_ca(true)
             .build_and_self_sign()
             .unwrap()
+    }
+
+    fn dummy_crl(cert: Certificate) -> X509CrlWrapper {
+        let crl = X509CrlBuilder {
+            signer: cert,
+            this_update: Utc::now(),
+            next_update: None,
+            revoked: vec![RevokedCert {
+                serial: BigUint::from(123u32),
+                revocation_date: Utc::now(),
+                reasons: vec![CrlReason::KeyCompromise],
+            }],
+        };
+        let der = crl.build_and_sign();
+        X509CrlWrapper::from_der(der.as_slice()).unwrap()
     }
 
     #[test]
@@ -747,5 +827,75 @@ mod tests {
         let parsed =
             X509CrlBuilder::from_der(&der, dummy_certificate()).expect("Failed to parse DER");
         assert_eq!(parsed.revoked[0].reasons[0], CrlReason::KeyCompromise);
+    }
+
+    #[test]
+    fn test_from_der_and_to_der() {
+        let cert = dummy_certificate();
+        let crl_wrapper = dummy_crl(cert.clone());
+        let der = crl_wrapper.to_der().expect("Failed to convert to DER");
+        let parsed = X509CrlWrapper::from_der(&der).expect("Failed to parse DER");
+        assert_eq!(parsed.to_der().unwrap(), der);
+    }
+
+    #[test]
+    fn test_verify_signature() {
+        let cert = dummy_certificate();
+        let crl_wrapper = dummy_crl(cert.clone());
+        let pub_key = cert.x509.public_key().expect("Failed to get public key");
+        let verified = crl_wrapper
+            .verify_signature(&pub_key)
+            .expect("Verification failed");
+        assert!(verified);
+    }
+
+    #[test]
+    fn test_signature_with_wrong_signer() {
+        let cert = dummy_certificate();
+        let crl_wrapper = dummy_crl(cert.clone());
+        let wrong_cert = dummy_certificate();
+        let wrong_pub_key = wrong_cert
+            .x509
+            .public_key()
+            .expect("Failed to get public key");
+        let verified = crl_wrapper
+            .verify_signature(&wrong_pub_key)
+            .expect("Verification failed");
+        assert!(!verified);
+    }
+
+    #[test]
+    fn test_revoked_false() {
+        let cert = dummy_certificate();
+        let crl_wrapper = dummy_crl(cert.clone());
+        let serial = Asn1Integer::from_bn(&openssl::bn::BigNum::from_u32(123456).unwrap()).unwrap();
+        assert!(!crl_wrapper.revoked(&serial));
+    }
+
+    #[test]
+    fn test_revoked_true() {
+        let cert = dummy_certificate();
+        let crl_wrapper = dummy_crl(cert.clone());
+        let serial = Asn1Integer::from_bn(&openssl::bn::BigNum::from_u32(123).unwrap()).unwrap();
+        assert!(crl_wrapper.revoked(&serial));
+    }
+
+    #[test]
+    fn test_save_and_read_pem() {
+        let cert = dummy_certificate();
+        let crl_wrapper = dummy_crl(cert.clone());
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        let filename = "test_crl.pem";
+
+        crl_wrapper
+            .save_as_pem(path, filename)
+            .expect("Failed to save PEM");
+
+        let full_path = path.join(filename);
+        let read_crl = X509CrlWrapper::read_as_pem(&full_path).expect("Failed to read PEM");
+
+        assert_eq!(read_crl.to_der().unwrap(), crl_wrapper.to_der().unwrap());
     }
 }
