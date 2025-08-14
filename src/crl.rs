@@ -86,17 +86,38 @@ impl CrlReason {
     }
 }
 
+/// A wrapper around `openssl::x509::X509Crl` providing convenience methods
+/// for parsing, verifying, and handling CRLs (Certificate Revocation Lists).
 pub struct X509CrlWrapper {
     crl: X509Crl,
 }
 
 impl X509CrlWrapper {
+    /// Parses a CRL from DER-encoded bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `crl_der` - A byte slice containing the DER-encoded CRL.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the `X509CrlWrapper` on success, or an error.
     pub fn from_der(crl_der: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         match X509Crl::from_der(crl_der) {
             Ok(data) => Ok(Self { crl: data }),
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Verifies the signature of the CRL using the provided public key.
+    ///
+    /// # Arguments
+    ///
+    /// * `public_key` - A reference to the public key used to verify the CRL.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing `true` if the signature is valid, `false` otherwise.
     pub fn verify_signature(
         &self,
         public_key: &PKey<Public>,
@@ -106,12 +127,28 @@ impl X509CrlWrapper {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Serializes the CRL to DER format.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the DER-encoded bytes of the CRL.
     pub fn to_der(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         match self.crl.to_der() {
             Ok(data) => Ok(data),
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Checks if a given serial number is listed as revoked in the CRL.
+    ///
+    /// # Arguments
+    ///
+    /// * `serial` - A reference to the serial number to check.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the serial number is revoked, `false` otherwise.
     pub fn revoked(&self, serial: &Asn1IntegerRef) -> bool {
         if let Some(revoked) = self.crl.get_revoked() {
             revoked.into_iter().any(|r| r.serial_number() == serial)
@@ -119,6 +156,17 @@ impl X509CrlWrapper {
             false
         }
     }
+
+    /// Saves the CRL as a PEM file to the specified path and filename.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The directory path to save the file in.
+    /// * `filename` - The name of the PEM file.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or failure.
     pub fn save_as_pem<P: AsRef<Path>, F: AsRef<Path>>(
         &self,
         path: P,
@@ -137,6 +185,16 @@ impl X509CrlWrapper {
 
         Ok(())
     }
+
+    /// Reads a CRL from a PEM file and returns a wrapper.
+    ///
+    /// # Arguments
+    ///
+    /// * `crl_pem_file` - The path to the PEM file containing the CRL.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the `X509CrlWrapper` on success, or an error.
     pub fn read_as_pem<F: AsRef<Path>>(
         crl_pem_file: F,
     ) -> Result<Self, Box<dyn std::error::Error>> {
