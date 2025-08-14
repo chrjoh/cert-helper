@@ -159,6 +159,7 @@ let crl_wrapper = X509CrlWrapper::from_der(crl_der.as_slice()).unwrap();
 let result = crl_wrapper.verify_signature(ca.x509.public_key().as_ref().unwrap());
 assert!(result.unwrap());
 let is_revoked = crl_wrapper.revoked(revocked.x509.serial_number());
+assert!(is_revoked);
 ```
 
 ## Config
