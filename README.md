@@ -41,6 +41,10 @@ These constraints ensure that the certificate is recognized as a valid CA and ca
 - Issuing signed certificates from CSRs for controlled certificate management
 - Create crl for testing how a client handle certificate revocations, optionally add crl reason for the revoked certificate.
 
+## Changelog
+
+See CHANGELOG.md for details.
+
 ## Basic Example creating a certificate and private key
 
 ```rust
