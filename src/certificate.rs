@@ -910,6 +910,39 @@ impl CsrBuilder {
             fields: BuilderFields::default(),
         }
     }
+
+    /// Builds and returns a Certificate Signing Request (CSR) based on the configured builder fields.
+    ///
+    /// This function constructs the subject name, sets the public key, and adds relevant X.509 extensions
+    /// such as Key Usage, Extended Key Usage, and Subject Alternative Names (SAN).
+    /// It supports signing with both traditional algorithms and Ed25519.
+    ///
+    /// # Returns
+    /// - `Ok(Csr)` if the CSR was successfully built and signed.
+    /// - `Err(Box<dyn std::error::Error>)` if any step in the CSR creation process fails.
+    ///
+    /// # Errors
+    /// This function may return errors in the following cases:
+    /// - Failure to initialize or build the X509 name or request.
+    /// - Failure to select or use the appropriate key type.
+    /// - Failure to build or add X.509 extensions.
+    /// - Failure to sign the CSR, especially with Ed25519.
+    ///
+    /// # Extensions Added
+    /// - **Key Usage** and **Extended Key Usage**: Based on the builder's `usage` field.
+    /// - **Subject Alternative Names (SAN)**: Includes all entries from `alternative_names`.
+    ///
+    /// # Signing Behavior
+    /// - If the key type is Ed25519, uses a custom signing function.
+    /// - Otherwise, signs using the selected hash algorithm.
+    ///
+    /// # Example
+    /// ```rust
+    /// use cert_helper::certificate::CsrBuilder;
+    /// use crate::cert_helper::certificate::UseesBuilderFields;
+    /// let builder = CsrBuilder::new().common_name("example.com");
+    /// let csr = builder.certificate_signing_request().unwrap();
+    /// ```
     pub fn certificate_signing_request(self) -> Result<Csr, Box<dyn std::error::Error>> {
         let mut name_builder = X509NameBuilder::new()?;
         name_builder.append_entry_by_nid(Nid::COMMONNAME, &self.fields.common_name)?;
