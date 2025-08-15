@@ -283,11 +283,14 @@ impl X509CrlBuilder {
     /// * `serial` - The serial number of the revoked certificate.
     /// * `revocation_date` - The date and time when the certificate was revoked.
     pub fn add_revoked_cert(&mut self, serial: BigUint, revocation_date: DateTime<Utc>) {
-        self.revoked.push(RevokedCert {
-            serial,
-            revocation_date,
-            reasons: Vec::new(),
-        });
+        let already_exists = self.revoked.iter().any(|cert| cert.serial == serial);
+        if !already_exists {
+            self.revoked.push(RevokedCert {
+                serial,
+                revocation_date,
+                reasons: Vec::new(),
+            });
+        }
     }
     /// Adds a revoked certificate to the CRL.
     ///
@@ -938,6 +941,21 @@ mod tests {
         assert!(crl_wrapper.revoked(&serial));
     }
 
+    #[test]
+    fn test_revoked_can_not_add_duplicates() {
+        let mut crl = X509CrlBuilder {
+            signer: dummy_certificate(), // You need to implement or mock this
+            this_update: Utc::now(),
+            next_update: Some(Utc::now() + chrono::Duration::days(30)),
+            revoked: vec![RevokedCert {
+                serial: BigUint::from(123u32),
+                revocation_date: Utc::now(),
+                reasons: vec![CrlReason::KeyCompromise],
+            }],
+        };
+        crl.add_revoked_cert(BigUint::from(123u32), Utc::now());
+        assert_eq!(crl.revoked.len(), 1);
+    }
     #[test]
     fn test_save_and_read_pem() {
         let cert = dummy_certificate();
