@@ -305,11 +305,14 @@ impl X509CrlBuilder {
         revocation_date: DateTime<Utc>,
         crl_reasons: Vec<CrlReason>,
     ) {
-        self.revoked.push(RevokedCert {
-            serial,
-            revocation_date,
-            reasons: crl_reasons,
-        });
+        let already_exists = self.revoked.iter().any(|cert| cert.serial == serial);
+        if !already_exists {
+            self.revoked.push(RevokedCert {
+                serial,
+                revocation_date,
+                reasons: crl_reasons,
+            });
+        }
     }
     /// Sets the `this_update` and `next_update` timestamps for the CRL.
     ///
@@ -954,6 +957,25 @@ mod tests {
             }],
         };
         crl.add_revoked_cert(BigUint::from(123u32), Utc::now());
+        assert_eq!(crl.revoked.len(), 1);
+    }
+    #[test]
+    fn test_revoked_with_reason_can_not_add_duplicates() {
+        let mut crl = X509CrlBuilder {
+            signer: dummy_certificate(), // You need to implement or mock this
+            this_update: Utc::now(),
+            next_update: Some(Utc::now() + chrono::Duration::days(30)),
+            revoked: vec![RevokedCert {
+                serial: BigUint::from(123u32),
+                revocation_date: Utc::now(),
+                reasons: vec![CrlReason::KeyCompromise],
+            }],
+        };
+        crl.add_revoked_cert_with_reason(
+            BigUint::from(123u32),
+            Utc::now(),
+            vec![CrlReason::CaCompromise],
+        );
         assert_eq!(crl.revoked.len(), 1);
     }
     #[test]

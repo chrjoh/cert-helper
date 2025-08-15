@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.13] - 2025-08-15
+
+- Fix bug with adding revoked certificates and CRL
+
+---
+
 ## [0.3.12] - 2025-08-15
 
 - Fix so that if certificate serial is in the CRL list do not add duplicate
