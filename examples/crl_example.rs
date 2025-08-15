@@ -12,7 +12,7 @@ fn main() {
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
         .is_ca(true)
-        .key_type(KeyType::Ed25519)
+        .key_type(KeyType::P256)
         .build_and_self_sign()
         .unwrap();
     let mut builder = X509CrlBuilder::new(ca);
@@ -26,7 +26,7 @@ fn main() {
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
         .is_ca(true)
-        .key_type(KeyType::Ed25519)
+        .key_type(KeyType::P256)
         .build_and_self_sign()
         .unwrap();
     let revocked = CertBuilder::new()
