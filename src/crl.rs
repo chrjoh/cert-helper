@@ -10,6 +10,8 @@ use openssl::x509::{X509, X509Crl};
 use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::Path;
+use x509_parser::extensions::ParsedExtension;
+use x509_parser::parse_x509_certificate;
 use yasna::models::ObjectIdentifier;
 use yasna::tags;
 use yasna::tags::{TAG_BITSTRING, TAG_GENERALIZEDTIME, TAG_UTCTIME};
@@ -333,6 +335,18 @@ impl X509CrlBuilder {
     ///
     /// A `Vec<u8>` containing the DER-encoded CRL.
     pub fn build_and_sign(&self) -> Vec<u8> {
+        match can_sign_crl(&self.signer.x509) {
+            Ok(can_sign) => {
+                if !can_sign {
+                    panic!(
+                        "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:{:?}",
+                        self.signer.x509.issuer_name()
+                    )
+                }
+            }
+            Err(e) => panic!("failed to parse crl signer certificate, with error: {}", e),
+        }
+
         let tbs = yasna::construct_der(|writer| {
             writer.write_sequence(|writer| {
                 writer.next().write_u8(1); // Version v2
@@ -703,6 +717,32 @@ fn get_clean_subject_name(x509: &X509) -> Option<String> {
         }
     }
     None
+}
+fn can_sign_crl(cert: &X509) -> Result<bool, Box<dyn std::error::Error>> {
+    let der = cert.to_der()?;
+    let (_, parsed_cert) = parse_x509_certificate(&der)?;
+
+    let mut is_ca = false;
+    let mut can_sign = false;
+    let not_after_asn1_time = cert.not_after().to_string();
+    let naive =
+        NaiveDateTime::parse_from_str(&not_after_asn1_time, "%b %e %H:%M:%S %Y GMT").unwrap();
+    let not_after_utc: DateTime<Utc> = Utc.from_utc_datetime(&naive);
+    let now = Utc::now();
+    let valid_time = now < not_after_utc;
+
+    for ext in parsed_cert.tbs_certificate.extensions().iter() {
+        match &ext.parsed_extension() {
+            ParsedExtension::BasicConstraints(bc) => {
+                is_ca = bc.ca;
+            }
+            ParsedExtension::KeyUsage(ku) => {
+                can_sign = ku.crl_sign();
+            }
+            _ => {}
+        }
+    }
+    Ok(is_ca && can_sign && valid_time)
 }
 
 #[cfg(test)]

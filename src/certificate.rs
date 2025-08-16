@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use foreign_types::ForeignType;
 use openssl::asn1::{Asn1Object, Asn1OctetString, Asn1Time};
 use openssl::bn::BigNum;
@@ -1253,6 +1253,12 @@ fn can_sign_cert(cert: &X509) -> Result<bool, Box<dyn std::error::Error>> {
 
     let mut is_ca = false;
     let mut can_sign = false;
+    let not_after_asn1_time = cert.not_after().to_string();
+    let naive =
+        NaiveDateTime::parse_from_str(&not_after_asn1_time, "%b %e %H:%M:%S %Y GMT").unwrap();
+    let not_after_utc: DateTime<Utc> = Utc.from_utc_datetime(&naive);
+    let now = Utc::now();
+    let valid_time = now < not_after_utc;
 
     for ext in parsed_cert.tbs_certificate.extensions().iter() {
         match &ext.parsed_extension() {
@@ -1265,7 +1271,7 @@ fn can_sign_cert(cert: &X509) -> Result<bool, Box<dyn std::error::Error>> {
             _ => {}
         }
     }
-    Ok(is_ca && can_sign)
+    Ok(is_ca && can_sign && valid_time)
 }
 
 #[cfg(test)]

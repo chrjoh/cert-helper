@@ -85,6 +85,18 @@ fn must_not_create_cert_with_non_ca_signer_cert() -> Result<(), Box<dyn std::err
 }
 
 #[test]
+fn must_not_create_cert_with_expired_ca_signer_cert() -> Result<(), Box<dyn std::error::Error>> {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .valid_to("2020-01-01");
+    let root_cert = ca.build_and_self_sign()?;
+    let leaf = CertBuilder::new().common_name("My Test");
+    let leaf_cert = leaf.build_and_sign(&root_cert);
+    assert!(leaf_cert.is_err(), "Expected an error but got Ok");
+    Ok(())
+}
+#[test]
 fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error>> {
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
@@ -579,6 +591,20 @@ fn test_parse_crl_from_der_signed_with_key_ed25519() {
     let builder = X509CrlBuilder::from_der(&crl_der, ca);
     assert!(builder.is_ok());
 }
+#[test]
+#[should_panic(
+    expected = "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:[commonName = \"My Test Ca\"]"
+)]
+fn test_can_not_sign_crl_with_non_ca_cert() {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(false)
+        .key_type(KeyType::P256)
+        .build_and_self_sign()
+        .unwrap();
+    let _ = X509CrlBuilder::new(ca.clone()).build_and_sign();
+}
+
 #[test]
 fn test_creating_crl_with_revocked_certificate() {
     let ca = CertBuilder::new()

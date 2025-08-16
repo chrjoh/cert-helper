@@ -6,3 +6,4 @@ read_certs.rs
 todo.txt
 .DS_Store
 tmp
+examples/certs
