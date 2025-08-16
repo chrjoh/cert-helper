@@ -728,8 +728,14 @@ fn can_sign_crl(cert: &X509) -> Result<bool, Box<dyn std::error::Error>> {
     let naive =
         NaiveDateTime::parse_from_str(&not_after_asn1_time, "%b %e %H:%M:%S %Y GMT").unwrap();
     let not_after_utc: DateTime<Utc> = Utc.from_utc_datetime(&naive);
+
+    let not_before_asn1_time = cert.not_before().to_string();
+    let naive =
+        NaiveDateTime::parse_from_str(&not_before_asn1_time, "%b %e %H:%M:%S %Y GMT").unwrap();
+    let not_before_utc: DateTime<Utc> = Utc.from_utc_datetime(&naive);
+
     let now = Utc::now();
-    let valid_time = now < not_after_utc;
+    let valid_time = (now < not_after_utc) && (now >= not_before_utc);
 
     for ext in parsed_cert.tbs_certificate.extensions().iter() {
         match &ext.parsed_extension() {

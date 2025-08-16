@@ -96,6 +96,21 @@ fn must_not_create_cert_with_expired_ca_signer_cert() -> Result<(), Box<dyn std:
     assert!(leaf_cert.is_err(), "Expected an error but got Ok");
     Ok(())
 }
+
+#[test]
+fn must_not_create_cert_with_not_before_in_feature_ca_signer_cert()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .valid_from("2120-01-01");
+    let root_cert = ca.build_and_self_sign()?;
+    let leaf = CertBuilder::new().common_name("My Test");
+    let leaf_cert = leaf.build_and_sign(&root_cert);
+    assert!(leaf_cert.is_err(), "Expected an error but got Ok");
+    Ok(())
+}
+
 #[test]
 fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error>> {
     let ca = CertBuilder::new()
@@ -599,6 +614,36 @@ fn test_can_not_sign_crl_with_non_ca_cert() {
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
         .is_ca(false)
+        .key_type(KeyType::P256)
+        .build_and_self_sign()
+        .unwrap();
+    let _ = X509CrlBuilder::new(ca.clone()).build_and_sign();
+}
+
+#[test]
+#[should_panic(
+    expected = "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:[commonName = \"My Test Ca\"]"
+)]
+fn test_can_not_sign_crl_with_ca_cert_with_valid_passed() {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .valid_to("2010-01-01")
+        .key_type(KeyType::P256)
+        .build_and_self_sign()
+        .unwrap();
+    let _ = X509CrlBuilder::new(ca.clone()).build_and_sign();
+}
+
+#[test]
+#[should_panic(
+    expected = "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:[commonName = \"My Test Ca\"]"
+)]
+fn test_can_not_sign_crl_with_ca_cert_with_valid_from_in_future() {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .valid_from("2120-01-01")
         .key_type(KeyType::P256)
         .build_and_self_sign()
         .unwrap();
