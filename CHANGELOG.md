@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.14] - 2025-08-16
+
+- Set basic constraint to critical if CA is true
+
+---
+
 ## [0.3.13] - 2025-08-15
 
 - Fix bug with adding revoked certificates and CRL

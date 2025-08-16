@@ -406,7 +406,7 @@ impl Csr {
             }
         }
         if options.ca {
-            builder.append_extension(BasicConstraints::new().ca().build()?)?;
+            builder.append_extension(BasicConstraints::new().ca().critical().build()?)?;
             if !any_key_used {
                 let key_usage = KeyUsage::new().key_cert_sign().crl_sign().build().unwrap();
                 builder.append_extension(key_usage)?;
@@ -825,7 +825,7 @@ impl CertBuilder {
 
         let key_usage = self.fields.usage.clone().unwrap_or_default();
         if self.ca {
-            builder.append_extension(BasicConstraints::new().ca().build()?)?;
+            builder.append_extension(BasicConstraints::new().ca().critical().build()?)?;
         } else {
             builder.append_extension(BasicConstraints::new().build()?)?;
         }

@@ -22,8 +22,10 @@ fn create_minimal_self_signed_cert() -> Result<(), Box<dyn std::error::Error>> {
         x509.issuer_name().to_der().ok(),
         x509.subject_name().to_der().ok()
     );
-    if !has_ca_cert_and_crl_sign(&x509) {
-        return Err("Missing Certificate Sign or CRL Sign usage".into());
+    if !has_ca_cert_and_crl_sign_with_basic_const_critical(&x509) {
+        return Err(
+            "Missing Certificate Sign or CRL Sign usage or basic const. not critical".into(),
+        );
     }
     Ok(())
 }
@@ -40,8 +42,10 @@ fn create_minimal_ed25519_self_signed_cert() -> Result<(), Box<dyn std::error::E
         x509.issuer_name().to_der().ok(),
         x509.subject_name().to_der().ok()
     );
-    if !has_ca_cert_and_crl_sign(&x509) {
-        return Err("Missing Certificate Sign or CRL Sign usage".into());
+    if !has_ca_cert_and_crl_sign_with_basic_const_critical(&x509) {
+        return Err(
+            "Missing Certificate Sign or CRL Sign usage or basic const. not critical".into(),
+        );
     }
     Ok(())
 }
@@ -517,8 +521,10 @@ fn create_signed_ca_certificate_from_csr() -> Result<(), Box<dyn std::error::Err
         get_clean_subject_name(&cert.x509),
         Some("example2.com".into())
     );
-    if !has_ca_cert_and_crl_sign(&cert.x509) {
-        return Err("Missing Certificate Sign or CRL Sign usage".into());
+    if !has_ca_cert_and_crl_sign_with_basic_const_critical(&cert.x509) {
+        return Err(
+            "Missing Certificate Sign or CRL Sign usage or basic const. not critical".into(),
+        );
     }
     assert_eq!(
         cert.x509.issuer_name().to_der().unwrap(),
@@ -695,13 +701,14 @@ fn get_clean_subject_name(x509: &X509) -> Option<String> {
 ///
 /// Check the function can_sign_cert in certificate.rs file on how to do
 /// correct check by fetching the exact extesnsions.
-fn has_ca_cert_and_crl_sign(cert: &X509) -> bool {
+fn has_ca_cert_and_crl_sign_with_basic_const_critical(cert: &X509) -> bool {
     if let Ok(text) = cert.to_text() {
         let text = String::from_utf8_lossy(&text);
         text.contains("X509v3 Key Usage")
             && text.contains("Certificate Sign")
             && text.contains("CRL Sign")
             && text.contains("CA:TRUE")
+            && text.contains("X509v3 Basic Constraints: critical")
     } else {
         false
     }
