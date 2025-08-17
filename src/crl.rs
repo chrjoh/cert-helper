@@ -206,6 +206,24 @@ impl X509CrlWrapper {
             Err(e) => Err(e.into()),
         }
     }
+    /// Converts the current CRL wrapper into a builder using the provided signer certificate.
+    ///
+    /// This method is useful when you want to update an existing CRL by adding new revoked certificates
+    /// and re-signing it with a given certificate.
+    ///
+    /// # Arguments
+    ///
+    /// * `signer` - The certificate used to sign the updated CRL.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the `X509CrlBuilder` on success, or an error.
+    pub fn to_builder(
+        &self,
+        signer: Certificate,
+    ) -> Result<X509CrlBuilder, Box<dyn std::error::Error>> {
+        X509CrlBuilder::from_der(&self.to_der()?, signer)
+    }
 }
 
 /// Represents a builder for creating and signing X.509 Certificate Revocation Lists (CRLs).
@@ -334,17 +352,14 @@ impl X509CrlBuilder {
     /// # Returns
     ///
     /// A `Vec<u8>` containing the DER-encoded CRL.
-    pub fn build_and_sign(&self) -> Vec<u8> {
-        match can_sign_crl(&self.signer.x509) {
-            Ok(can_sign) => {
-                if !can_sign {
-                    panic!(
-                        "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:{:?}",
-                        self.signer.x509.issuer_name()
-                    )
-                }
-            }
-            Err(e) => panic!("failed to parse crl signer certificate, with error: {}", e),
+    pub fn build_and_sign(&self) -> Result<X509CrlWrapper, Box<dyn std::error::Error>> {
+        let can_sign = can_sign_crl(&self.signer.x509)?;
+        if !can_sign {
+            let err = format!(
+                "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:{:?}",
+                self.signer.x509.issuer_name()
+            );
+            return Err(err.into());
         }
 
         let tbs = yasna::construct_der(|writer| {
@@ -452,7 +467,7 @@ impl X509CrlBuilder {
         }
 
         // Final CRL
-        yasna::construct_der(|writer| {
+        let crl_der = yasna::construct_der(|writer| {
             writer.write_sequence(|writer| {
                 writer.next().write_der(&tbs);
 
@@ -476,7 +491,9 @@ impl X509CrlBuilder {
                         writer.write_bytes(&bit_string);
                     });
             });
-        })
+        });
+        let wrapper = X509CrlWrapper::from_der(&crl_der)?;
+        Ok(wrapper)
     }
     /// Parses a DER-encoded CRL and constructs an `X509CrlBuilder` from it.
     ///
@@ -780,8 +797,7 @@ mod tests {
                 reasons: vec![CrlReason::KeyCompromise],
             }],
         };
-        let der = crl.build_and_sign();
-        X509CrlWrapper::from_der(der.as_slice()).unwrap()
+        crl.build_and_sign().unwrap()
     }
 
     #[test]
@@ -818,8 +834,8 @@ mod tests {
         let cert = dummy_certificate();
 
         let builder = X509CrlBuilder::new(cert);
-        let crl_der = builder.build_and_sign();
-        assert!(!crl_der.is_empty());
+        let wrapper = builder.build_and_sign();
+        assert!(wrapper.is_ok());
     }
 
     #[test]
@@ -833,10 +849,11 @@ mod tests {
         builder.add_revoked_cert(serial.clone(), revocation_date);
 
         // Build and sign the CRL
-        let crl_der = builder.build_and_sign();
+        let wrapper = builder.build_and_sign().unwrap();
 
         // Parse the CRL back
-        let parsed = X509CrlBuilder::from_der(&crl_der, cert).expect("Failed to parse DER");
+        let parsed = X509CrlBuilder::from_der(&wrapper.to_der().unwrap(), cert)
+            .expect("Failed to parse DER");
 
         // Check that the parsed data matches
         assert_eq!(parsed.revoked.len(), 1);
@@ -866,8 +883,8 @@ mod tests {
         let mut builder = X509CrlBuilder::new(ca);
         builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now());
 
-        let crl_der = builder.build_and_sign();
-
+        let wrapper = builder.build_and_sign().unwrap();
+        let crl_der = wrapper.to_der().unwrap();
         let dir = tempdir().unwrap();
         let file_name = "test_crl.pem";
         let result = write_der_crl_as_pem(&crl_der, dir.path(), file_name);
@@ -890,7 +907,8 @@ mod tests {
                 reasons: vec![CrlReason::KeyCompromise],
             }],
         };
-        let der = crl.build_and_sign();
+        let wrapper = crl.build_and_sign().unwrap();
+        let der = wrapper.to_der().unwrap();
         assert!(der.len() > 0);
         let parsed =
             X509CrlBuilder::from_der(&der, dummy_certificate()).expect("Failed to parse DER");
@@ -911,8 +929,8 @@ mod tests {
             }],
         };
 
-        let der = crl.build_and_sign();
-
+        let wrapper = crl.build_and_sign().unwrap();
+        let der = wrapper.to_der().unwrap();
         // Decode the CRL and check it is valid
         let result = yasna::parse_der(&der, |reader| {
             reader.read_sequence(|reader| {

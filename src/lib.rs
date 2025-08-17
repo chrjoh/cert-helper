@@ -144,15 +144,14 @@
 //!                          Utc::now(),
 //!                          vec![CrlReason::KeyCompromise]);
 //!
-//! let crl_der = builder.build_and_sign();
+//! let wrapper = builder.build_and_sign().unwrap();
 //! // to save crl as pem use the helper function
-//! // write_der_crl_as_pem(&crl_der, "./certs", "crl.pem").expect("failed to save crl as pem file");
+//! //  wrapper.save_as_pem("./certs", "crl.pem").expect("failed to save crl as pem file");
 //!
 //! // use the wrapper to check sign, revocations
-//! let crl_wrapper = X509CrlWrapper::from_der(crl_der.as_slice()).unwrap();
-//! let result = crl_wrapper.verify_signature(ca.x509.public_key().as_ref().unwrap());
+//! let result = wrapper.verify_signature(ca.x509.public_key().as_ref().unwrap());
 //! assert!(result.unwrap());
-//! let is_revoked = crl_wrapper.revoked(revocked.x509.serial_number());
+//! let is_revoked = wrapper.revoked(revocked.x509.serial_number());
 //! assert!(is_revoked);
 //! ```
 //!

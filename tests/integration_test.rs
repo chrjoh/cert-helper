@@ -602,14 +602,13 @@ fn test_parse_crl_from_der_signed_with_key_ed25519() {
         .key_type(KeyType::Ed25519)
         .build_and_self_sign()
         .unwrap();
-    let crl_der = X509CrlBuilder::new(ca.clone()).build_and_sign();
+    let wrapper = X509CrlBuilder::new(ca.clone()).build_and_sign().unwrap();
+    let crl_der = wrapper.to_der().unwrap();
     let builder = X509CrlBuilder::from_der(&crl_der, ca);
     assert!(builder.is_ok());
 }
+
 #[test]
-#[should_panic(
-    expected = "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:[commonName = \"My Test Ca\"]"
-)]
 fn test_can_not_sign_crl_with_non_ca_cert() {
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
@@ -617,13 +616,11 @@ fn test_can_not_sign_crl_with_non_ca_cert() {
         .key_type(KeyType::P256)
         .build_and_self_sign()
         .unwrap();
-    let _ = X509CrlBuilder::new(ca.clone()).build_and_sign();
+    let result = X509CrlBuilder::new(ca.clone()).build_and_sign();
+    assert!(result.is_err());
 }
 
 #[test]
-#[should_panic(
-    expected = "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:[commonName = \"My Test Ca\"]"
-)]
 fn test_can_not_sign_crl_with_ca_cert_with_valid_passed() {
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
@@ -632,13 +629,11 @@ fn test_can_not_sign_crl_with_ca_cert_with_valid_passed() {
         .key_type(KeyType::P256)
         .build_and_self_sign()
         .unwrap();
-    let _ = X509CrlBuilder::new(ca.clone()).build_and_sign();
+    let result = X509CrlBuilder::new(ca.clone()).build_and_sign();
+    assert!(result.is_err());
 }
 
 #[test]
-#[should_panic(
-    expected = "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:[commonName = \"My Test Ca\"]"
-)]
 fn test_can_not_sign_crl_with_ca_cert_with_valid_from_in_future() {
     let ca = CertBuilder::new()
         .common_name("My Test Ca")
@@ -647,7 +642,8 @@ fn test_can_not_sign_crl_with_ca_cert_with_valid_from_in_future() {
         .key_type(KeyType::P256)
         .build_and_self_sign()
         .unwrap();
-    let _ = X509CrlBuilder::new(ca.clone()).build_and_sign();
+    let result = X509CrlBuilder::new(ca.clone()).build_and_sign();
+    assert!(result.is_err());
 }
 
 #[test]
@@ -665,13 +661,15 @@ fn test_creating_crl_with_revocked_certificate() {
     let mut builder = X509CrlBuilder::new(ca);
     let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
     builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
-    let crl_der = builder.build_and_sign();
+    let wrapper = builder.build_and_sign().unwrap();
+    let crl_der = wrapper.to_der().unwrap();
     assert!(!crl_der.is_empty());
     // verify signature
     let crl = X509Crl::from_der(crl_der.as_slice());
     let result = crl.unwrap().verify(public_key.as_ref().unwrap());
     assert_eq!(result.unwrap(), true);
 }
+
 #[test]
 fn test_clr_wrapper() {
     let ca = CertBuilder::new()
@@ -693,10 +691,14 @@ fn test_clr_wrapper() {
 
     let bytes = revocked_one.x509.serial_number().to_bn().unwrap().to_vec();
     builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
+    let wrapper = builder.build_and_sign().unwrap();
+    // reconstruct builder from wrapper
+    builder = wrapper.to_builder(ca.clone()).unwrap();
     let bytes = revocked_two.x509.serial_number().to_bn().unwrap().to_vec();
     builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
 
-    let crl_der = builder.build_and_sign();
+    let wrapper = builder.build_and_sign().unwrap();
+    let crl_der = wrapper.to_der().unwrap();
     assert!(!crl_der.is_empty());
     let crl_wrapper = X509CrlWrapper::from_der(crl_der.as_slice()).unwrap();
     // verify signature
@@ -730,13 +732,15 @@ fn test_creating_crl_with_revocked_certificate_and_signer_key_ed25519() {
     let mut builder = X509CrlBuilder::new(ca);
     let bytes = revocked.x509.serial_number().to_bn().unwrap().to_vec();
     builder.add_revoked_cert(BigUint::from_bytes_be(&bytes), Utc::now());
-    let crl_der = builder.build_and_sign();
+    let wrapper = builder.build_and_sign().unwrap();
+    let crl_der = wrapper.to_der().unwrap();
     assert!(!crl_der.is_empty());
     // verify signature
     let crl = X509Crl::from_der(crl_der.as_slice());
     let result = crl.unwrap().verify(public_key.as_ref().unwrap());
     assert_eq!(result.unwrap(), true);
 }
+
 #[test]
 fn test_creating_and_parse_crl_with_no_revocked_certificates() {
     let ca = CertBuilder::new()
@@ -745,7 +749,8 @@ fn test_creating_and_parse_crl_with_no_revocked_certificates() {
         .build_and_self_sign()
         .unwrap();
     let builder = X509CrlBuilder::new(ca);
-    let crl_der = builder.build_and_sign();
+    let wrapper = builder.build_and_sign().unwrap();
+    let crl_der = wrapper.to_der().unwrap();
     assert!(!crl_der.is_empty());
 
     let ca = CertBuilder::new()
@@ -756,6 +761,7 @@ fn test_creating_and_parse_crl_with_no_revocked_certificates() {
     let parsed = X509CrlBuilder::from_der(&crl_der, ca);
     assert!(parsed.is_ok());
 }
+
 fn get_clean_subject_name(x509: &X509) -> Option<String> {
     let subject_name = x509.subject_name();
     if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next() {

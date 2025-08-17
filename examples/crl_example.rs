@@ -18,7 +18,8 @@ fn main() {
     let mut builder = X509CrlBuilder::new(ca);
     builder.add_revoked_cert(12345u32.to_biguint().unwrap(), Utc::now());
 
-    let crl_der = builder.build_and_sign();
+    let wrapper = builder.build_and_sign().unwrap();
+    let crl_der = wrapper.to_der().unwrap();
     // write result as simple der file
     std::fs::write("./certs/crl.der", &crl_der).unwrap();
     write_der_crl_as_pem(&crl_der, "./certs", "crl_first.pem")
@@ -48,7 +49,8 @@ fn main() {
     );
     builder.set_update_times(Utc::now(), Utc::now() + chrono::Duration::days(30));
 
-    let crl_der = builder.build_and_sign();
+    let wrapper = builder.build_and_sign().unwrap();
+    let crl_der = wrapper.to_der().unwrap();
     std::fs::write("./certs/crl_final.der", &crl_der).unwrap();
     write_der_crl_as_pem(&crl_der, "./certs", "crl_final.pem")
         .expect("failed to save crl as pem file");

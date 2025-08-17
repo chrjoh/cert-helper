@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2025-08-17
+
+- Add check that signer certificate is valid for signing crl
+- Include check that time have valid to and from for signer certificate
+- add to_builder method to X509CrlWrapper
+- Breaking change:
+  - X509CrlBuilder build_and_sign now returns Result<X509CrlWrapper, Box<dyn std::error::Error>>
+    instead of Vec<u8>, the der vector can be retrived with to_der() method in X509CrlWrapper
+
+---
+
 ## [0.3.14] - 2025-08-16
 
 - Set basic constraint to critical if CA is true
