@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2026-04-17
+
+- Security upgrade of time-core to 0.1.8
+
 ## [0.4.0] - 2025-08-17
 
 - Add check that signer certificate is valid for signing crl
