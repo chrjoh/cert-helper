@@ -3,7 +3,6 @@ name = "cert-helper"
 version = "0.4.2"
 edition = "2024"
 authors = ["Christer Johansson"]
-build = false
 autobins = false
 autoexamples = false
 autobenches = false
@@ -29,6 +28,27 @@ path = "examples/create_certificates_and_write_to_file.rs"
 [[example]]
 name = "crl_example"
 path = "examples/crl_example.rs"
+
+[[example]]
+name = "verify_pqc_cli"
+path = "examples/verify_pqc_cli.rs"
+required-features = ["pqc"]
+
+[[example]]
+name = "pqc_all_variants"
+path = "examples/pqc_all_variants.rs"
+required-features = ["pqc"]
+
+[[example]]
+name = "pqc_crl_example"
+path = "examples/pqc_crl_example.rs"
+required-features = ["pqc"]
+
+[features]
+# Experimental: post-quantum signature algorithms (ML-DSA, SLH-DSA) via direct
+# openssl-sys FFI. Requires OpenSSL >= 3.5 at build and runtime. See
+# docs/quantum-safe-ciphers.md and spec/features/01-pqc-keys/plan.md.
+pqc = []
 
 [dependencies]
 bit-vec = "0.8.0"

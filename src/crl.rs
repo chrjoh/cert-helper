@@ -1,10 +1,9 @@
-use crate::certificate::Certificate;
+use crate::certificate::{Certificate, is_digestless_key};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use num_bigint::BigUint;
 use openssl::asn1::Asn1IntegerRef;
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
-use openssl::pkey::Id;
 use openssl::pkey::{PKey, Public};
 use openssl::x509::{X509, X509Crl};
 use std::fs::{File, create_dir_all};
@@ -450,7 +449,7 @@ impl X509CrlBuilder {
         });
 
         // Sign the TBS (To Be Signed)
-        let signature: Vec<u8> = if self.signer.pkey.clone().unwrap().id() == Id::ED25519 {
+        let signature: Vec<u8> = if is_digestless_key(self.signer.pkey.as_ref().unwrap()) {
             let mut signer =
                 openssl::sign::Signer::new_without_digest(self.signer.pkey.as_ref().unwrap())
                     .unwrap();
@@ -721,6 +720,26 @@ fn signature_algorithm_oid(name: &str) -> Option<&'static [u64]> {
         "ecdsa-with-SHA384" => Some(&[1, 2, 840, 10045, 4, 3, 3]),
         "ecdsa-with-SHA512" => Some(&[1, 2, 840, 10045, 4, 3, 4]),
         "ED25519" => Some(&[1, 3, 101, 112]),
+        // Post-quantum (FIPS 204 / 205). OpenSSL reports these as short names
+        // like "ML-DSA-65" or as OID strings when short name isn't registered.
+        "ML-DSA-44" | "id-ml-dsa-44" | "2.16.840.1.101.3.4.3.17" => {
+            Some(&[2, 16, 840, 1, 101, 3, 4, 3, 17])
+        }
+        "ML-DSA-65" | "id-ml-dsa-65" | "2.16.840.1.101.3.4.3.18" => {
+            Some(&[2, 16, 840, 1, 101, 3, 4, 3, 18])
+        }
+        "ML-DSA-87" | "id-ml-dsa-87" | "2.16.840.1.101.3.4.3.19" => {
+            Some(&[2, 16, 840, 1, 101, 3, 4, 3, 19])
+        }
+        "SLH-DSA-SHA2-128s" | "id-slh-dsa-sha2-128s" | "2.16.840.1.101.3.4.3.20" => {
+            Some(&[2, 16, 840, 1, 101, 3, 4, 3, 20])
+        }
+        "SLH-DSA-SHA2-192s" | "id-slh-dsa-sha2-192s" | "2.16.840.1.101.3.4.3.22" => {
+            Some(&[2, 16, 840, 1, 101, 3, 4, 3, 22])
+        }
+        "SLH-DSA-SHA2-256s" | "id-slh-dsa-sha2-256s" | "2.16.840.1.101.3.4.3.24" => {
+            Some(&[2, 16, 840, 1, 101, 3, 4, 3, 24])
+        }
         _ => None,
     }
 }

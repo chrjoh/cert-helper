@@ -32,6 +32,10 @@ unsafe extern "C" {
         pkey: *mut openssl_sys::EVP_PKEY,
         md: *const openssl_sys::EVP_MD,
     ) -> ::std::os::raw::c_int;
+    pub fn X509_sign_ctx(
+        x: *mut openssl_sys::X509,
+        ctx: *mut openssl_sys::EVP_MD_CTX,
+    ) -> ::std::os::raw::c_int;
 }
 
 unsafe extern "C" {
@@ -40,43 +44,247 @@ unsafe extern "C" {
         pkey: *mut openssl_sys::EVP_PKEY,
         md: *const openssl_sys::EVP_MD,
     ) -> ::std::os::raw::c_int;
+    pub fn X509_REQ_sign_ctx(
+        req: *mut openssl_sys::X509_REQ,
+        ctx: *mut openssl_sys::EVP_MD_CTX,
+    ) -> ::std::os::raw::c_int;
 }
 
-fn sign_certificate_ed25519(
+/// Sign a just-built `X509` in-place with a digest-less key (Ed25519 or PQC).
+///
+/// We avoid `X509_sign(x, pkey, NULL)` because OpenSSL 3.5+ infers a default
+/// digest for ML-DSA/SLH-DSA in that path, which their providers then reject.
+/// Instead we initialise an `EVP_MD_CTX` with an explicit NULL `mdname` and
+/// hand it to `X509_sign_ctx`.
+/// Sign a just-built `X509` in-place with a digest-less key (Ed25519 or PQC).
+///
+/// Ed25519 uses the plain `X509_sign(x, pkey, NULL)` path that has always
+/// worked. PQC keys (ML-DSA / SLH-DSA) need a workaround on OpenSSL 3.5+:
+/// `X509_sign(_, _, NULL)` triggers default-digest inference in
+/// `do_sigver_init`, and the PQC providers then reject the inferred digest
+/// with "Explicit digest not supported". We instead initialise an `EVP_MD_CTX`
+/// with an *empty* C string as `mdname` — that bypasses the default-digest
+/// lookup inside OpenSSL while still satisfying the provider's
+/// `mdname[0] != '\0'` guard — and hand the ctx to `X509_sign_ctx`.
+fn sign_certificate_digestless(
     cert: &X509,
     pkey: &PKey<openssl::pkey::Private>,
 ) -> Result<(), String> {
-    if pkey.id() != Id::ED25519 {
-        return Err("sign_certificate_ed25519 called with non-Ed25519 key".to_string());
+    if !is_digestless_key(pkey) {
+        return Err("sign_certificate_digestless called with non-digestless key".to_string());
     }
     let cert_ptr = cert.as_ptr();
     let pkey_ptr = pkey.as_ptr();
 
-    let result = unsafe { X509_sign(cert_ptr, pkey_ptr, std::ptr::null()) };
+    if pkey.id() == Id::ED25519 {
+        let result = unsafe { X509_sign(cert_ptr, pkey_ptr, std::ptr::null()) };
+        return if result > 0 {
+            Ok(())
+        } else {
+            Err("Failed to sign certificate with Ed25519".to_string())
+        };
+    }
+
+    // PQC path: EVP_DigestSignInit (non-ex) with NULL mdname + X509_sign_ctx.
+    // `Signer::new_without_digest` in the openssl crate uses this exact call and
+    // it works for ML-DSA/SLH-DSA whereas `EVP_DigestSignInit_ex` does not.
+    let result = unsafe {
+        let ctx = openssl_sys::EVP_MD_CTX_new();
+        if ctx.is_null() {
+            return Err("EVP_MD_CTX_new returned NULL".to_string());
+        }
+        let init = openssl_sys::EVP_DigestSignInit(
+            ctx,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            pkey_ptr,
+        );
+        if init <= 0 {
+            openssl_sys::EVP_MD_CTX_free(ctx);
+            return Err("EVP_DigestSignInit failed for PQC key".to_string());
+        }
+        let rc = X509_sign_ctx(cert_ptr, ctx);
+        openssl_sys::EVP_MD_CTX_free(ctx);
+        rc
+    };
 
     if result > 0 {
         Ok(())
     } else {
-        Err("Failed to sign certificate with Ed25519".to_string())
+        Err("X509_sign_ctx failed for PQC key".to_string())
     }
 }
 
-fn sign_x509_req_ed25519(req: &X509Req, pkey: &PKey<Private>) -> Result<(), String> {
-    if pkey.id() != Id::ED25519 {
-        return Err("sign_x509_req_ed25519 called with non-Ed25519 key".to_string());
+/// Same as `sign_certificate_digestless` but for `X509Req`. See the
+/// `sign_certificate_digestless` docstring for why Ed25519 and PQC take
+/// different OpenSSL paths.
+fn sign_x509_req_digestless(req: &X509Req, pkey: &PKey<Private>) -> Result<(), String> {
+    if !is_digestless_key(pkey) {
+        return Err("sign_x509_req_digestless called with non-digestless key".to_string());
     }
-
     let req_ptr = req.as_ptr();
     let pkey_ptr = pkey.as_ptr();
 
-    let result = unsafe { X509_REQ_sign(req_ptr, pkey_ptr, std::ptr::null()) };
+    if pkey.id() == Id::ED25519 {
+        let result = unsafe { X509_REQ_sign(req_ptr, pkey_ptr, std::ptr::null()) };
+        return if result > 0 {
+            Ok(())
+        } else {
+            Err("Failed to sign X509Req with Ed25519".to_string())
+        };
+    }
+
+    let result = unsafe {
+        let ctx = openssl_sys::EVP_MD_CTX_new();
+        if ctx.is_null() {
+            return Err("EVP_MD_CTX_new returned NULL".to_string());
+        }
+        let init = openssl_sys::EVP_DigestSignInit(
+            ctx,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            pkey_ptr,
+        );
+        if init <= 0 {
+            openssl_sys::EVP_MD_CTX_free(ctx);
+            return Err("EVP_DigestSignInit failed for PQC key".to_string());
+        }
+        let rc = X509_REQ_sign_ctx(req_ptr, ctx);
+        openssl_sys::EVP_MD_CTX_free(ctx);
+        rc
+    };
 
     if result > 0 {
         Ok(())
     } else {
-        Err("Failed to sign X509Req with Ed25519".to_string())
+        Err("X509_REQ_sign_ctx failed for PQC key".to_string())
     }
 }
+
+/// Returns true for keys whose OpenSSL EVP signing path does not take an
+/// external digest. Today: Ed25519 and (when the `pqc` feature is enabled)
+/// the six FIPS 204 / 205 post-quantum variants.
+pub(crate) fn is_digestless_key(pkey: &PKey<Private>) -> bool {
+    if pkey.id() == Id::ED25519 {
+        return true;
+    }
+    #[cfg(feature = "pqc")]
+    {
+        return is_pqc_pkey(pkey);
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
+#[cfg(feature = "pqc")]
+fn is_pqc_pkey(pkey: &PKey<Private>) -> bool {
+    use std::ffi::CString;
+    use std::sync::OnceLock;
+
+    // Cache the CStrings so we don't rebuild them per call.
+    static NAMES: OnceLock<[CString; 6]> = OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        [
+            CString::new("ML-DSA-44").unwrap(),
+            CString::new("ML-DSA-65").unwrap(),
+            CString::new("ML-DSA-87").unwrap(),
+            CString::new("SLH-DSA-SHA2-128s").unwrap(),
+            CString::new("SLH-DSA-SHA2-192s").unwrap(),
+            CString::new("SLH-DSA-SHA2-256s").unwrap(),
+        ]
+    });
+    use foreign_types::ForeignType;
+    let ptr = pkey.as_ptr();
+    names
+        .iter()
+        // SAFETY: EVP_PKEY_is_a accepts any NUL-terminated C string and a
+        // valid EVP_PKEY*; returns 0 for mismatch, 1 for match — never UB.
+        .any(|n| unsafe { pqc::EVP_PKEY_is_a(ptr, n.as_ptr()) } == 1)
+}
+
+#[cfg(feature = "pqc")]
+mod pqc {
+    use foreign_types::ForeignType;
+    use openssl::error::ErrorStack;
+    use openssl::pkey::{PKey, Private};
+    use std::ffi::CString;
+
+    unsafe extern "C" {
+        fn EVP_PKEY_CTX_new_from_name(
+            libctx: *mut std::ffi::c_void,
+            name: *const std::os::raw::c_char,
+            propquery: *const std::os::raw::c_char,
+        ) -> *mut openssl_sys::EVP_PKEY_CTX;
+        fn EVP_PKEY_keygen_init(ctx: *mut openssl_sys::EVP_PKEY_CTX) -> std::os::raw::c_int;
+        fn EVP_PKEY_generate(
+            ctx: *mut openssl_sys::EVP_PKEY_CTX,
+            ppkey: *mut *mut openssl_sys::EVP_PKEY,
+        ) -> std::os::raw::c_int;
+        fn EVP_PKEY_CTX_free(ctx: *mut openssl_sys::EVP_PKEY_CTX);
+        /// Returns 1 if `pkey` is of algorithm `name`, 0 otherwise.
+        /// Use this instead of `EVP_PKEY_id` for provider-only algorithms
+        /// (ML-DSA, SLH-DSA) whose legacy NID is -1.
+        pub fn EVP_PKEY_is_a(
+            pkey: *mut openssl_sys::EVP_PKEY,
+            name: *const std::os::raw::c_char,
+        ) -> std::os::raw::c_int;
+    }
+
+    /// RAII guard that frees an `EVP_PKEY_CTX` on drop, including unwinds.
+    struct PkeyCtx(*mut openssl_sys::EVP_PKEY_CTX);
+
+    impl Drop for PkeyCtx {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { EVP_PKEY_CTX_free(self.0) }
+            }
+        }
+    }
+
+    /// Generate a post-quantum signing key by OpenSSL EVP algorithm name.
+    ///
+    /// Accepts the FIPS 204 / FIPS 205 canonical names:
+    /// `"ML-DSA-44"`, `"ML-DSA-65"`, `"ML-DSA-87"`,
+    /// `"SLH-DSA-SHA2-128s"`, `"SLH-DSA-SHA2-192s"`, `"SLH-DSA-SHA2-256s"`.
+    ///
+    /// Returns `Err(ErrorStack)` if the algorithm is unknown to the linked
+    /// OpenSSL, keygen init fails, or key generation fails. Never panics,
+    /// never leaks the `EVP_PKEY_CTX`.
+    pub(super) fn generate_pqc_key(alg_name: &str) -> Result<PKey<Private>, ErrorStack> {
+        let cname = CString::new(alg_name).expect("alg_name contains interior NUL");
+
+        // SAFETY: NULL libctx => default library context. NULL propquery matches
+        // every provider. The returned ctx is owned by PkeyCtx, freed on all paths.
+        let ctx_ptr = unsafe {
+            EVP_PKEY_CTX_new_from_name(std::ptr::null_mut(), cname.as_ptr(), std::ptr::null())
+        };
+        if ctx_ptr.is_null() {
+            return Err(ErrorStack::get());
+        }
+        let ctx = PkeyCtx(ctx_ptr);
+
+        if unsafe { EVP_PKEY_keygen_init(ctx.0) } <= 0 {
+            return Err(ErrorStack::get());
+        }
+
+        let mut pkey_ptr: *mut openssl_sys::EVP_PKEY = std::ptr::null_mut();
+        if unsafe { EVP_PKEY_generate(ctx.0, &mut pkey_ptr) } <= 0 {
+            return Err(ErrorStack::get());
+        }
+        if pkey_ptr.is_null() {
+            return Err(ErrorStack::get());
+        }
+
+        // SAFETY: EVP_PKEY_generate returned ownership of a freshly-allocated
+        // EVP_PKEY. PKey::from_ptr takes ownership and frees on drop.
+        Ok(unsafe { PKey::<Private>::from_ptr(pkey_ptr) })
+    }
+}
+
+#[cfg(feature = "pqc")]
+use pqc::generate_pqc_key;
 
 macro_rules! vec_str_to_hs {
     ($vec:expr) => {
@@ -102,6 +310,24 @@ pub enum KeyType {
     P521,
     /// Edwards-curve Digital Signature Algorithm using Ed25519.
     Ed25519,
+    /// ML-DSA-44 (FIPS 204, formerly Dilithium2). Post-quantum lattice signature.
+    #[cfg(feature = "pqc")]
+    MlDsa44,
+    /// ML-DSA-65 (FIPS 204, formerly Dilithium3). Post-quantum lattice signature.
+    #[cfg(feature = "pqc")]
+    MlDsa65,
+    /// ML-DSA-87 (FIPS 204, formerly Dilithium5). Post-quantum lattice signature.
+    #[cfg(feature = "pqc")]
+    MlDsa87,
+    /// SLH-DSA-SHA2-128s (FIPS 205, formerly SPHINCS+). Hash-based signature, small variant.
+    #[cfg(feature = "pqc")]
+    SlhDsaSha2_128s,
+    /// SLH-DSA-SHA2-192s (FIPS 205). Hash-based signature, medium variant.
+    #[cfg(feature = "pqc")]
+    SlhDsaSha2_192s,
+    /// SLH-DSA-SHA2-256s (FIPS 205). Hash-based signature, large variant.
+    #[cfg(feature = "pqc")]
+    SlhDsaSha2_256s,
 }
 /// Defines which hash algorithm to be used in certificate signing
 #[derive(Debug, Clone)]
@@ -443,10 +669,10 @@ impl Csr {
         let ski_asn1 = Asn1OctetString::new_from_bytes(&der_encoded)?;
         let ext = X509Extension::new_from_der(oid.as_ref(), false, &ski_asn1)?;
         builder.append_extension(ext)?;
-        let cert: X509 = if signer.pkey.clone().unwrap().id() == Id::ED25519 {
+        let cert: X509 = if is_digestless_key(signer.pkey.as_ref().unwrap()) {
             let builder_cert = builder.build();
-            sign_certificate_ed25519(&builder_cert, signer.pkey.as_ref().unwrap())
-                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
+            sign_certificate_digestless(&builder_cert, signer.pkey.as_ref().unwrap())
+                .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
             builder_cert
         } else {
             builder.sign(signer.pkey.as_ref().unwrap(), MessageDigest::sha256())?;
@@ -740,10 +966,10 @@ impl CertBuilder {
     /// create a self signed x509 certificate and private key
     pub fn build_and_self_sign(&self) -> Result<Certificate, Box<dyn std::error::Error>> {
         let (mut builder, pkey) = self.prepare_x509_builder(None)?;
-        let ca_cert: X509 = if pkey.id() == Id::ED25519 {
+        let ca_cert: X509 = if is_digestless_key(&pkey) {
             let build_cert = builder.build();
-            sign_certificate_ed25519(&build_cert, &pkey)
-                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
+            sign_certificate_digestless(&build_cert, &pkey)
+                .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
             build_cert
         } else {
             builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
@@ -770,10 +996,10 @@ impl CertBuilder {
         }
         let (mut builder, pkey) = self.prepare_x509_builder(Some(signer))?;
         let signer_key = signer.pkey.as_ref().unwrap();
-        let cert: X509 = if signer_key.id() == Id::ED25519 {
+        let cert: X509 = if is_digestless_key(signer_key) {
             let build_cert = builder.build();
-            sign_certificate_ed25519(&build_cert, signer_key)
-                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
+            sign_certificate_digestless(&build_cert, signer_key)
+                .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
             build_cert
         } else {
             builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
@@ -998,10 +1224,10 @@ impl CsrBuilder {
         extensions.push(san.build(&builder.x509v3_context(None))?)?;
 
         builder.add_extensions(&extensions)?;
-        let csr: X509Req = if pkey.id() == Id::ED25519 {
+        let csr: X509Req = if is_digestless_key(&pkey) {
             let builder_csr = builder.build();
-            sign_x509_req_ed25519(&builder_csr, &pkey)
-                .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
+            sign_x509_req_digestless(&builder_csr, &pkey)
+                .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
             builder_csr
         } else {
             builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
@@ -1206,6 +1432,18 @@ fn select_key(key_type: &Option<KeyType>) -> Result<PKey<Private>, ErrorStack> {
             PKey::from_ec_key(ec_key)
         }
         Some(KeyType::Ed25519) => PKey::generate_ed25519(),
+        #[cfg(feature = "pqc")]
+        Some(KeyType::MlDsa44) => generate_pqc_key("ML-DSA-44"),
+        #[cfg(feature = "pqc")]
+        Some(KeyType::MlDsa65) => generate_pqc_key("ML-DSA-65"),
+        #[cfg(feature = "pqc")]
+        Some(KeyType::MlDsa87) => generate_pqc_key("ML-DSA-87"),
+        #[cfg(feature = "pqc")]
+        Some(KeyType::SlhDsaSha2_128s) => generate_pqc_key("SLH-DSA-SHA2-128s"),
+        #[cfg(feature = "pqc")]
+        Some(KeyType::SlhDsaSha2_192s) => generate_pqc_key("SLH-DSA-SHA2-192s"),
+        #[cfg(feature = "pqc")]
+        Some(KeyType::SlhDsaSha2_256s) => generate_pqc_key("SLH-DSA-SHA2-256s"),
         Some(KeyType::RSA4096) => {
             let rsa = Rsa::generate(4096)?;
             PKey::from_rsa(rsa)

@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Experimental post-quantum key support behind the `pqc` Cargo feature.
+  New `KeyType` variants: `MlDsa44`, `MlDsa65`, `MlDsa87`, `SlhDsaSha2_128s`,
+  `SlhDsaSha2_192s`, `SlhDsaSha2_256s`. Keys are generated via direct
+  `openssl-sys` FFI (`EVP_PKEY_CTX_new_from_name` / `EVP_PKEY_generate`);
+  signing reuses the Ed25519 digest-less path (`X509_sign` / `X509_REQ_sign`
+  with `md = NULL`). Requires OpenSSL ≥ 3.5 at build and runtime, enforced by
+  `build.rs`. Non-breaking: builds without `--features pqc` are unchanged.
+
+### Changed
+
+- Internal: `sign_certificate_ed25519` / `sign_x509_req_ed25519` renamed to
+  `sign_certificate_digestless` / `sign_x509_req_digestless`. New crate-visible
+  helper `is_digestless_key` accepts Ed25519 and PQC keys. No public-API impact.
+
 ## [0.4.2] - 2026-04-23
 
 Version bumps:

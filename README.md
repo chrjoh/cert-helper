@@ -15,6 +15,7 @@ This library provides a set of utility functions to simplify common tasks such a
 
 - Creating self-signed or CA-signed certificates
 - Generating RSA, ECDSA,or Ed25519 private keys, note that Ed25519 do not require any hash variant
+- Optionally, post-quantum signing keys (ML-DSA, SLH-DSA) behind the `pqc` Cargo feature — see the *Post-Quantum keys* section below
 - Creating Certificate Signing Requests (CSRs)
 - Signing certificates from CSRs using a CA certificate and key
 - Reading and writing certificates, keys, and CSRs in PEM format
@@ -22,6 +23,28 @@ This library provides a set of utility functions to simplify common tasks such a
 - Create or update certificate revocation list(crl)
   - Note that this is a simple crl parser that only handle the fields that are included then
     generating a crl with this code
+
+### Post-Quantum keys (experimental)
+
+Build with `--features pqc` to enable NIST-standardized post-quantum signature
+algorithms as new `KeyType` variants:
+
+- `MlDsa44`, `MlDsa65`, `MlDsa87` — FIPS 204 (ML-DSA, formerly Dilithium)
+- `SlhDsaSha2_128s`, `SlhDsaSha2_192s`, `SlhDsaSha2_256s` — FIPS 205 (SLH-DSA, formerly SPHINCS+)
+
+**Runtime requirement:** OpenSSL **≥ 3.5** at build and runtime (enforced at
+`build.rs` time). The `openssl` Rust crate does not yet expose safe high-level
+wrappers for these algorithms — this implementation uses `openssl-sys` FFI
+directly, mirroring the Ed25519 digest-less signing path. Availability and
+stability track upstream; expect churn until safe bindings land.
+
+```rust
+use cert_helper::certificate::{CertBuilder, KeyType};
+let ca = CertBuilder::new()
+    .common_name("My PQC CA")
+    .key_type(KeyType::MlDsa65)
+    .build_and_self_sign()?;
+```
 
 ### Certificate Signing Requirements
 
@@ -172,7 +195,7 @@ Values that can be selected for building a certificate
 | keyword | description | options |
 | ----------------- | --------------------------------------------------------------------------- | ----------------------------------- |
 | common_name | the common name this certificate shoud have, mandatory field | string: www.foo.se |
-| key_type | key type to be used, defaults to RSA2048 | enum: RSA2048, RSA4096, P224, P256, P384, P512, Ed25519 |
+| key_type | key type to be used, defaults to RSA2048 | enum: RSA2048, RSA4096, P224, P256, P384, P521, Ed25519, and with `--features pqc`: MlDsa44, MlDsa65, MlDsa87, SlhDsaSha2_128s, SlhDsaSha2_192s, SlhDsaSha2_256s |
 | ca | is this certificate used to sign other certificates, default value is false | boolean: true or false |
 | country_name | the country code to use,must follow the standard defined by ISO 3166-1 alpha-2. | string: SE |
 | organization | organisation name | string: test |
