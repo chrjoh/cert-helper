@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.2] - 2026-04-23
+
+Version bumps:
+
+- bitflags 2.9.1 → 2.11.1
+- bumpalo 3.19.0 → 3.20.2
+- cc 1.2.30 → 1.2.60
+- cfg-if 1.0.1 → 1.0.4
+- chrono 0.4.41 → 0.4.44
+- data-encoding 2.9.0 → 2.10.0
+- errno 0.3.13 → 0.3.14
+- fastrand 2.3.0 → 2.4.1
+- getrandom 0.3.3 → 0.4.2
+- iana-time-zone 0.1.63 → 0.1.65
+- itoa 1.0.15 → 1.0.18
+- js-sys 0.3.77 → 0.3.95
+- libc 0.2.174 → 0.2.185
+- linux-raw-sys 0.9.4 → 0.12.1
+- log 0.4.27 → 0.4.29
+- memchr 2.7.5 → 2.8.0
+- once_cell 1.21.3 → 1.21.4
+- openssl 0.10.73 → 0.10.78
+- openssl-sys 0.9.109 → 0.9.114
+- pkg-config 0.3.32 → 0.3.33
+- proc-macro2 1.0.95 → 1.0.106
+- quote 1.0.40 → 1.0.45
+- r-efi 5.3.0 → 6.0.0
+- rustix 1.0.8 → 1.1.4
+- rustversion 1.0.21 → 1.0.22
+- syn 2.0.104 → 2.0.117
+- tempfile 3.20.0 → 3.27.0
+- thiserror / thiserror-impl 2.0.12 → 2.0.18
+- unicode-ident 1.0.18 → 1.0.24
+- wasm-bindgen (+ macros/shared) 0.2.100 → 0.2.118
+- windows-core 0.61.2 → 0.62.2, plus related windows-\* crates consolidated onto windows-link (dropping the old windows-targets split)
+
+Added (new transitive deps):
+
+- anyhow, equivalent, find-msvc-tools, foldhash, hashbrown (0.15 + 0.17), heck, id-arena, indexmap, leb128fmt, prettyplease, semver, serde, serde_json, unicode-xid, wasip2, wasip3, wasm-encoder, wasm-metadata, wasmparser, wit-bindgen (0.51 + 0.57),
+  wit-bindgen-core, wit-bindgen-rust, wit-bindgen-rust-macro, wit-component, wit-parser, zmij
+
+Removed: android-tzdata, old wit-bindgen-rt, the windows-targets/windows\*\*\*\* platform sub-crates
+
 ## [0.4.1] - 2026-04-17
 
 - Security upgrade of time-core to 0.1.8
