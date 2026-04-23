@@ -20,7 +20,7 @@
 //! - Validating certificate chains and properties
 //! - Create or update certificate revocation list(crl)
 //!   - Note that this is a simple crl parser that only handle the fields that are included then
-//!  generating a crl with this code
+//!     generating a crl with this code
 //!
 //! ### Certificate Signing Requirements
 //! To sign another certificate, the signing certificate must:

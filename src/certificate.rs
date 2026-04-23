@@ -214,11 +214,10 @@ impl<T: X509Parts> X509Common for T {
             file.write_all(content)?;
             Ok(())
         };
-        match self.get_private_key() {
-            Ok(ref key) => write_file("_pkey.pem", key)?,
-            Err(_) => {}
+        if let Ok(ref key) = self.get_private_key() {
+            write_file("_pkey.pem", key)?;
         }
-        write_file(&self.pem_extension(), &self.get_pem()?)?;
+        write_file(self.pem_extension(), &self.get_pem()?)?;
         Ok(())
     }
 }
@@ -257,6 +256,12 @@ pub struct CsrOptions {
     valid_from: Asn1Time,
     ca: bool,
 }
+impl Default for CsrOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CsrOptions {
     /// Creates a default `CsrOptions` instance:
     /// - `valid_from` is set to today.
@@ -438,16 +443,15 @@ impl Csr {
         let ski_asn1 = Asn1OctetString::new_from_bytes(&der_encoded)?;
         let ext = X509Extension::new_from_der(oid.as_ref(), false, &ski_asn1)?;
         builder.append_extension(ext)?;
-        let cert: X509;
-        if signer.pkey.clone().unwrap().id() == Id::ED25519 {
+        let cert: X509 = if signer.pkey.clone().unwrap().id() == Id::ED25519 {
             let builder_cert = builder.build();
             sign_certificate_ed25519(&builder_cert, signer.pkey.as_ref().unwrap())
                 .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
-            cert = builder_cert;
+            builder_cert
         } else {
             builder.sign(signer.pkey.as_ref().unwrap(), MessageDigest::sha256())?;
-            cert = builder.build();
-        }
+            builder.build()
+        };
 
         Ok(Certificate {
             x509: cert,
@@ -686,6 +690,12 @@ impl UseesBuilderFields for CertBuilder {
         &mut self.fields
     }
 }
+impl Default for CertBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CertBuilder {
     /// Create a new CertBuilder with defaults and one year from now as valid date
     pub fn new() -> Self {
@@ -730,16 +740,15 @@ impl CertBuilder {
     /// create a self signed x509 certificate and private key
     pub fn build_and_self_sign(&self) -> Result<Certificate, Box<dyn std::error::Error>> {
         let (mut builder, pkey) = self.prepare_x509_builder(None)?;
-        let ca_cert: X509;
-        if pkey.id() == Id::ED25519 {
+        let ca_cert: X509 = if pkey.id() == Id::ED25519 {
             let build_cert = builder.build();
             sign_certificate_ed25519(&build_cert, &pkey)
                 .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
-            ca_cert = build_cert;
+            build_cert
         } else {
             builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
-            ca_cert = builder.build();
-        }
+            builder.build()
+        };
 
         Ok(Certificate {
             x509: ca_cert,
@@ -759,18 +768,17 @@ impl CertBuilder {
             );
             return Err(err.into());
         }
-        let (mut builder, pkey) = self.prepare_x509_builder(Some(&signer))?;
+        let (mut builder, pkey) = self.prepare_x509_builder(Some(signer))?;
         let signer_key = signer.pkey.as_ref().unwrap();
-        let cert: X509;
-        if signer_key.id() == Id::ED25519 {
+        let cert: X509 = if signer_key.id() == Id::ED25519 {
             let build_cert = builder.build();
-            sign_certificate_ed25519(&build_cert, &signer_key)
+            sign_certificate_ed25519(&build_cert, signer_key)
                 .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
-            cert = build_cert;
+            build_cert
         } else {
             builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
-            cert = builder.build();
-        }
+            builder.build()
+        };
         Ok(Certificate {
             x509: cert,
             pkey: Some(pkey),
@@ -903,6 +911,12 @@ impl UseesBuilderFields for CsrBuilder {
         &mut self.fields
     }
 }
+impl Default for CsrBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CsrBuilder {
     /// Create a new CsrBuilder with defaults
     pub fn new() -> Self {
@@ -984,16 +998,15 @@ impl CsrBuilder {
         extensions.push(san.build(&builder.x509v3_context(None))?)?;
 
         builder.add_extensions(&extensions)?;
-        let csr: X509Req;
-        if pkey.id() == Id::ED25519 {
+        let csr: X509Req = if pkey.id() == Id::ED25519 {
             let builder_csr = builder.build();
             sign_x509_req_ed25519(&builder_csr, &pkey)
                 .map_err(|e| format!("Failed to sign certificate with ED25519: {}", e))?;
-            csr = builder_csr;
+            builder_csr
         } else {
             builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
-            csr = builder.build();
-        }
+            builder.build()
+        };
         Ok(Csr {
             csr,
             pkey: Some(pkey),
@@ -1098,7 +1111,7 @@ pub fn verify_cert(
     cert_chain
         .iter()
         .try_for_each(|c| chain.push((*c).clone()))?;
-    ctx.init(&store, &cert, &chain, |c| c.verify_cert())?;
+    ctx.init(&store, cert, &chain, |c| c.verify_cert())?;
     let verified = ctx.error() == openssl::x509::X509VerifyResult::OK;
     Ok(verified)
 }

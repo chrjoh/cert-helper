@@ -372,7 +372,7 @@ impl X509CrlBuilder {
                 writer.next().write_sequence(|writer| {
                     writer
                         .next()
-                        .write_oid(&ObjectIdentifier::from_slice(&sig_oid));
+                        .write_oid(&ObjectIdentifier::from_slice(sig_oid));
                     writer.next().write_null();
                 });
 
@@ -406,7 +406,7 @@ impl X509CrlBuilder {
                                 .write_bigint_bytes(&revoked.serial.to_bytes_be(), true);
                             write_generalized_time(writer.next(), &revoked.revocation_date);
 
-                            if revoked.reasons.len() > 0 {
+                            if !revoked.reasons.is_empty() {
                                 writer.next().write_sequence_of(|writer| {
                                     for reason in &revoked.reasons {
                                         writer.next().write_sequence(|writer| {
@@ -450,12 +450,11 @@ impl X509CrlBuilder {
         });
 
         // Sign the TBS (To Be Signed)
-        let signature: Vec<u8>;
-        if self.signer.pkey.clone().unwrap().id() == Id::ED25519 {
+        let signature: Vec<u8> = if self.signer.pkey.clone().unwrap().id() == Id::ED25519 {
             let mut signer =
                 openssl::sign::Signer::new_without_digest(self.signer.pkey.as_ref().unwrap())
                     .unwrap();
-            signature = signer.sign_oneshot_to_vec(&tbs).unwrap();
+            signer.sign_oneshot_to_vec(&tbs).unwrap()
         } else {
             let mut signer = openssl::sign::Signer::new(
                 MessageDigest::sha256(),
@@ -463,8 +462,8 @@ impl X509CrlBuilder {
             )
             .unwrap();
             signer.update(&tbs).unwrap();
-            signature = signer.sign_to_vec().unwrap();
-        }
+            signer.sign_to_vec().unwrap()
+        };
 
         // Final CRL
         let crl_der = yasna::construct_der(|writer| {
@@ -477,7 +476,7 @@ impl X509CrlBuilder {
                 writer.next().write_sequence(|writer| {
                     writer
                         .next()
-                        .write_oid(&ObjectIdentifier::from_slice(&sig_oid));
+                        .write_oid(&ObjectIdentifier::from_slice(sig_oid));
                     writer.next().write_null();
                 });
 
@@ -516,7 +515,7 @@ impl X509CrlBuilder {
                 // Signature Algorithm
                 let _sig_algo_oid = reader.next().read_sequence(|reader| {
                     let oid = reader.next().read_oid()?;
-                    let _ = reader.next().read_null()?;
+                    reader.next().read_null()?;
                     Ok(oid)
                 })?;
 
@@ -533,9 +532,9 @@ impl X509CrlBuilder {
                 reader.read_sequence(|reader| {
                     let _version = reader.read_optional(|reader| reader.read_u8());
 
-                    let _ = reader.next().read_sequence(|reader| {
+                    reader.next().read_sequence(|reader| {
                         let _ = reader.next().read_oid()?;
-                        let _ = reader.next().read_null()?;
+                        reader.next().read_null()?;
                         Ok(())
                     })?;
 
@@ -591,7 +590,7 @@ impl X509CrlBuilder {
                         revoked.push(RevokedCert {
                             serial: BigUint::from_bytes_be(&serial),
                             revocation_date: revocation_date.unwrap(),
-                            reasons: reasons,
+                            reasons,
                         });
                         Ok(())
                     });
@@ -605,7 +604,7 @@ impl X509CrlBuilder {
                                     let _critical = reader.read_optional(|reader| match reader
                                         .lookahead_tag()?
                                     {
-                                        tag if tag == Tag::from(tags::TAG_BOOLEAN) => {
+                                        tag if tag == tags::TAG_BOOLEAN => {
                                             reader.read_bool().map(Some)
                                         }
                                         _ => Ok(None),
@@ -728,10 +727,10 @@ fn signature_algorithm_oid(name: &str) -> Option<&'static [u64]> {
 
 fn get_clean_subject_name(x509: &X509) -> Option<String> {
     let subject_name = x509.subject_name();
-    if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next() {
-        if let Ok(data) = entry.data().as_utf8() {
-            return Some(data.to_string());
-        }
+    if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next()
+        && let Ok(data) = entry.data().as_utf8()
+    {
+        return Some(data.to_string());
     }
     None
 }
@@ -909,7 +908,7 @@ mod tests {
         };
         let wrapper = crl.build_and_sign().unwrap();
         let der = wrapper.to_der().unwrap();
-        assert!(der.len() > 0);
+        assert!(!der.is_empty());
         let parsed =
             X509CrlBuilder::from_der(&der, dummy_certificate()).expect("Failed to parse DER");
         assert_eq!(parsed.next_update, None);
@@ -939,7 +938,7 @@ mod tests {
                 // Signature Algorithm
                 let _sig_algo_oid = reader.next().read_sequence(|reader| {
                     let oid = reader.next().read_oid()?;
-                    let _ = reader.next().read_null()?;
+                    reader.next().read_null()?;
                     Ok(oid)
                 })?;
 

@@ -316,7 +316,7 @@ fn test_verify_certificate_chain() -> Result<(), Box<dyn std::error::Error>> {
         &root_cert_one.x509,
         vec![&middle_cert.x509],
     );
-    assert_eq!(result.unwrap(), true);
+    assert!(result.unwrap());
 
     // root_cert_two have not been used to sign middle_cert so should be false
     let result = verify_cert(
@@ -324,7 +324,7 @@ fn test_verify_certificate_chain() -> Result<(), Box<dyn std::error::Error>> {
         &root_cert_two.x509,
         vec![&middle_cert.x509],
     );
-    assert_eq!(result.unwrap(), false);
+    assert!(!result.unwrap());
     Ok(())
 }
 #[test]
@@ -391,7 +391,7 @@ fn test_verify_certificate_chain_with_middle_cert_key_ed25519()
         &root_cert_one.x509,
         vec![&middle_cert.x509],
     );
-    assert_eq!(result.unwrap(), true);
+    assert!(result.unwrap());
 
     // root_cert_two have not been used to sign middle_cert so should be false
     let result = verify_cert(
@@ -399,7 +399,7 @@ fn test_verify_certificate_chain_with_middle_cert_key_ed25519()
         &root_cert_two.x509,
         vec![&middle_cert.x509],
     );
-    assert_eq!(result.unwrap(), false);
+    assert!(!result.unwrap());
     Ok(())
 }
 #[test]
@@ -667,7 +667,7 @@ fn test_creating_crl_with_revocked_certificate() {
     // verify signature
     let crl = X509Crl::from_der(crl_der.as_slice());
     let result = crl.unwrap().verify(public_key.as_ref().unwrap());
-    assert_eq!(result.unwrap(), true);
+    assert!(result.unwrap());
 }
 
 #[test]
@@ -703,17 +703,17 @@ fn test_clr_wrapper() {
     let crl_wrapper = X509CrlWrapper::from_der(crl_der.as_slice()).unwrap();
     // verify signature
     let result = crl_wrapper.verify_signature(public_key.as_ref().unwrap());
-    assert_eq!(result.unwrap(), true);
+    assert!(result.unwrap());
     // check that certifificate is revoked
     let mut is_revoked = crl_wrapper.revoked(revoked_serial_to_check);
-    assert_eq!(is_revoked, true);
+    assert!(is_revoked);
     // check that non revoked is not found
     let not_revocked = CertBuilder::new()
         .common_name("My Test")
         .build_and_self_sign()
         .unwrap();
     is_revoked = crl_wrapper.revoked(not_revocked.x509.serial_number());
-    assert_eq!(is_revoked, false);
+    assert!(!is_revoked);
 }
 
 #[test]
@@ -738,7 +738,7 @@ fn test_creating_crl_with_revocked_certificate_and_signer_key_ed25519() {
     // verify signature
     let crl = X509Crl::from_der(crl_der.as_slice());
     let result = crl.unwrap().verify(public_key.as_ref().unwrap());
-    assert_eq!(result.unwrap(), true);
+    assert!(result.unwrap());
 }
 
 #[test]
@@ -764,10 +764,10 @@ fn test_creating_and_parse_crl_with_no_revocked_certificates() {
 
 fn get_clean_subject_name(x509: &X509) -> Option<String> {
     let subject_name = x509.subject_name();
-    if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next() {
-        if let Ok(data) = entry.data().as_utf8() {
-            return Some(data.to_string());
-        }
+    if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next()
+        && let Ok(data) = entry.data().as_utf8()
+    {
+        return Some(data.to_string());
     }
     None
 }
