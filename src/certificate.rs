@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
 use foreign_types::ForeignType;
 use openssl::asn1::{Asn1Object, Asn1OctetString, Asn1Time};
 use openssl::bn::BigNum;
@@ -1505,18 +1505,12 @@ fn can_sign_cert(cert: &X509) -> Result<bool, Box<dyn std::error::Error>> {
     let mut is_ca = false;
     let mut can_sign = false;
 
-    let not_after_asn1_time = cert.not_after().to_string();
-    let naive =
-        NaiveDateTime::parse_from_str(&not_after_asn1_time, "%b %e %H:%M:%S %Y GMT").unwrap();
-    let not_after_utc: DateTime<Utc> = Utc.from_utc_datetime(&naive);
-
-    let not_before_asn1_time = cert.not_before().to_string();
-    let naive =
-        NaiveDateTime::parse_from_str(&not_before_asn1_time, "%b %e %H:%M:%S %Y GMT").unwrap();
-    let not_before_utc: DateTime<Utc> = Utc.from_utc_datetime(&naive);
-
-    let now = Utc::now();
-    let valid_time = (now < not_after_utc) && (now >= not_before_utc);
+    // Compare the validity window using OpenSSL's native ASN.1 time comparison
+    // instead of a panic-prone string round-trip through chrono: `not_before`
+    // must be at or before now, and now must be strictly before `not_after`.
+    let now = Asn1Time::days_from_now(0)?;
+    let valid_time = cert.not_before().compare(&now)? != std::cmp::Ordering::Greater
+        && cert.not_after().compare(&now)? == std::cmp::Ordering::Greater;
 
     for ext in parsed_cert.tbs_certificate.extensions().iter() {
         match &ext.parsed_extension() {
