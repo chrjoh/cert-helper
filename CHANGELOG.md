@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.4] - 2026-06-13
+
+### Security
+
+- Updated `openssl` 0.10.78 → 0.10.81 and `openssl-sys` 0.9.114 → 0.9.117 in the
+  lock file to pick up upstream advisory fixes.
+
+### Fixed
+
+- Hardened CRL handling against malformed input — replaced panics (`unwrap`)
+  with propagated `Result` errors:
+  - `X509CrlBuilder::from_der` now returns an error instead of panicking when a
+    CRL has a missing/invalid `thisUpdate`/`nextUpdate` or an unparseable
+    revocation date.
+  - `X509CrlBuilder::build_and_sign` now returns an error (instead of panicking)
+    when the signer certificate uses a signature algorithm that is not mapped to
+    a known OID. The algorithm OID is resolved once up front before DER encoding.
+- Certificate/CRL signing validity checks (`can_sign_cert` / `can_sign_crl`) now
+  use OpenSSL's native ASN.1 time comparison instead of formatting the times to
+  strings and re-parsing them with `chrono`. This removes a panic on times that
+  do not match the expected `"%b %e %H:%M:%S %Y GMT"` rendering (e.g. post-2049
+  `GeneralizedTime`) and drops a locale/format dependency. Validity semantics
+  (`not_before <= now < not_after`) are unchanged.
+
+No public API or behavioral changes for valid input; affected functions already
+returned `Result`, so previously-panicking inputs now surface as `Err`.
+
 ## [0.4.3] - 2026-04-23
 
 ### Added
