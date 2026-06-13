@@ -361,13 +361,19 @@ impl X509CrlBuilder {
             return Err(err.into());
         }
 
+        // Resolve the signature-algorithm OID once, up front. The DER
+        // construction closures below cannot propagate errors, so an
+        // unsupported signer algorithm must fail here with an `Err` instead of
+        // panicking inside `construct_der`.
+        let sig_alg = self.signer.x509.signature_algorithm().object().to_string();
+        let sig_oid = signature_algorithm_oid(&sig_alg)
+            .ok_or_else(|| format!("Unsupported CRL signature algorithm: {}", sig_alg))?;
+
         let tbs = yasna::construct_der(|writer| {
             writer.write_sequence(|writer| {
                 writer.next().write_u8(1); // Version v2
 
                 // Signature Algorithm
-                let sig_alg = self.signer.x509.signature_algorithm().object().to_string();
-                let sig_oid = signature_algorithm_oid(&sig_alg).unwrap();
                 writer.next().write_sequence(|writer| {
                     writer
                         .next()
@@ -470,8 +476,6 @@ impl X509CrlBuilder {
                 writer.next().write_der(&tbs);
 
                 // Signature Algorithm
-                let sig_alg = self.signer.x509.signature_algorithm().object().to_string();
-                let sig_oid = signature_algorithm_oid(&sig_alg).unwrap();
                 writer.next().write_sequence(|writer| {
                     writer
                         .next()
@@ -586,9 +590,11 @@ impl X509CrlBuilder {
                                 Ok((serial_bytes, revocation_date, reasons))
                             })?;
 
+                        let revocation_date = revocation_date
+                            .map_err(|_| yasna::ASN1Error::new(yasna::ASN1ErrorKind::Invalid))?;
                         revoked.push(RevokedCert {
                             serial: BigUint::from_bytes_be(&serial),
-                            revocation_date: revocation_date.unwrap(),
+                            revocation_date,
                             reasons,
                         });
                         Ok(())
@@ -621,8 +627,8 @@ impl X509CrlBuilder {
 
         Ok(Self {
             signer,
-            this_update: this_update.unwrap(),
-            next_update: next_update.ok().unwrap(),
+            this_update: this_update?,
+            next_update: next_update.map_err(|e| format!("CRL nextUpdate parse error: {}", e))?,
             revoked,
         })
     }
