@@ -747,7 +747,7 @@ fn signature_algorithm_oid(name: &str) -> Option<&'static [u64]> {
 fn get_clean_subject_name(x509: &X509) -> Option<String> {
     let subject_name = x509.subject_name();
     if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next()
-        && let Ok(data) = entry.data().as_utf8()
+        && let Ok(data) = entry.data().to_string()
     {
         return Some(data.to_string());
     }

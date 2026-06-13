@@ -140,9 +140,9 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
 
     let subject = &x509.subject_name();
     let cn = subject.entries_by_nid(Nid::COMMONNAME).next().unwrap();
-    assert_eq!(cn.data().as_utf8()?.to_string(), "My Test Ca");
+    assert_eq!(cn.data().to_string()?, "My Test Ca");
     let country = subject.entries_by_nid(Nid::COUNTRYNAME).next().unwrap();
-    assert_eq!(country.data().as_utf8()?.to_string(), "SE");
+    assert_eq!(country.data().to_string()?, "SE");
 
     let sig_alg = &x509.signature_algorithm().object();
     assert_eq!(sig_alg.nid(), Nid::ECDSA_WITH_SHA512);
@@ -452,7 +452,7 @@ fn create_a_certificate_signing_request() -> Result<(), Box<dyn std::error::Erro
     let csr = csr_builder.certificate_signing_request()?;
     let subject_name = csr.csr.subject_name();
     let mut cn = subject_name.entries_by_nid(Nid::COMMONNAME);
-    let name = cn.next().unwrap().data().as_utf8().unwrap().to_string();
+    let name = cn.next().unwrap().data().to_string()?;
     assert_eq!(name, "example2.com");
     Ok(())
 }
@@ -479,7 +479,7 @@ fn create_a_certificate_signing_request_with_ed25519() -> Result<(), Box<dyn std
     let csr = csr_builder.certificate_signing_request()?;
     let subject_name = csr.csr.subject_name();
     let mut cn = subject_name.entries_by_nid(Nid::COMMONNAME);
-    let name = cn.next().unwrap().data().as_utf8().unwrap().to_string();
+    let name = cn.next().unwrap().data().to_string()?;
     assert_eq!(name, "example2.com");
     Ok(())
 }
@@ -765,7 +765,7 @@ fn test_creating_and_parse_crl_with_no_revocked_certificates() {
 fn get_clean_subject_name(x509: &X509) -> Option<String> {
     let subject_name = x509.subject_name();
     if let Some(entry) = subject_name.entries_by_nid(Nid::COMMONNAME).next()
-        && let Ok(data) = entry.data().as_utf8()
+        && let Ok(data) = entry.data().to_string()
     {
         return Some(data.to_string());
     }
