@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.5] - 2026-06-18
+
+### Added
+
+- Reject `keyEncipherment` (`Usage::encipherment`) on post-quantum signature keys
+  (ML-DSA / SLH-DSA). These algorithms are signature-only and cannot perform key
+  encipherment, so `build_and_self_sign`, `build_and_sign`, and
+  `certificate_signing_request` now return an `Err` for that combination instead of
+  emitting a non-conformant certificate/CSR. (`pqc` feature only.)
+
 ## [0.4.4] - 2026-06-13
 
 ### Security

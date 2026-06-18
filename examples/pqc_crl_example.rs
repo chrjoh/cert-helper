@@ -73,7 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Verifying CRL signature + revocation check...");
     let wrapper = X509CrlWrapper::read_as_pem("./certs/pqc_crl_final.pem")?;
     let signature_ok = wrapper.verify_signature(ca.x509.public_key().as_ref().unwrap())?;
-    assert!(signature_ok, "ML-DSA-65-signed CRL should verify against CA public key");
+    assert!(
+        signature_ok,
+        "ML-DSA-65-signed CRL should verify against CA public key"
+    );
 
     let is_revoked = wrapper.revoked(revoked.x509.serial_number());
     assert!(is_revoked, "leaf should be listed as revoked");

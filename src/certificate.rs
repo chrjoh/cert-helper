@@ -1058,6 +1058,20 @@ impl CertBuilder {
         }
 
         let key_usage = self.fields.usage.clone().unwrap_or_default();
+
+        // Post-quantum signature keys (ML-DSA / SLH-DSA) are signature-only and
+        // cannot perform key encipherment; reject the contradictory combination.
+        #[cfg(feature = "pqc")]
+        {
+            if is_pqc_pkey(&pkey) && key_usage.contains(&Usage::encipherment) {
+                return Err("keyEncipherment (Usage::encipherment) is not valid for a \
+                    post-quantum signature key (ML-DSA / SLH-DSA): these algorithms are \
+                    signature-only and cannot perform key encipherment. Use Usage::signature \
+                    (and certsign/crlsign for a CA) instead."
+                    .into());
+            }
+        }
+
         if self.ca {
             builder.append_extension(BasicConstraints::new().ca().critical().build()?)?;
         } else {
@@ -1206,6 +1220,19 @@ impl CsrBuilder {
         let pkey = select_key(&self.fields.key_type).unwrap();
         builder.set_pubkey(&pkey)?;
         let key_usage = self.fields.usage.clone().unwrap_or_default();
+
+        // Post-quantum signature keys (ML-DSA / SLH-DSA) cannot perform key
+        // encipherment; reject the contradictory combination in CSRs too.
+        #[cfg(feature = "pqc")]
+        {
+            if is_pqc_pkey(&pkey) && key_usage.contains(&Usage::encipherment) {
+                return Err("keyEncipherment (Usage::encipherment) is not valid for a \
+                    post-quantum signature key (ML-DSA / SLH-DSA): these algorithms are \
+                    signature-only and cannot perform key encipherment. Use Usage::signature \
+                    instead."
+                    .into());
+            }
+        }
 
         let mut extensions = Stack::new()?;
 

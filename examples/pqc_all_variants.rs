@@ -48,7 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ca.save("./certs/pqc/", stem)?;
 
         let der_len = ca.x509.to_der()?.len();
-        println!("  wrote ./certs/pqc/{}_cert.pem ({} bytes DER)", stem, der_len);
+        println!(
+            "  wrote ./certs/pqc/{}_cert.pem ({} bytes DER)",
+            stem, der_len
+        );
     }
 
     println!("\nAll six PQC variants written to ./certs/pqc/");

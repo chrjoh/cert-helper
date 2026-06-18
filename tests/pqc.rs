@@ -1,10 +1,13 @@
 #![cfg(feature = "pqc")]
 
-use cert_helper::certificate::{CertBuilder, CsrBuilder, CsrOptions, KeyType, UseesBuilderFields};
+use cert_helper::certificate::{
+    CertBuilder, CsrBuilder, CsrOptions, KeyType, Usage, UseesBuilderFields,
+};
 use cert_helper::crl::X509CrlBuilder;
 use chrono::Utc;
 use num_bigint::BigUint;
 use openssl::x509::X509Crl;
+use std::collections::HashSet;
 use x509_parser::parse_x509_certificate;
 
 fn roundtrip_self_signed(key_type: KeyType, expected_oid: &str) {
@@ -174,4 +177,55 @@ fn test_slhdsa_256s_large_signature_survives_pem_roundtrip() {
         "SLH-DSA-SHA2-256s cert unexpectedly small ({} bytes)",
         der1.len()
     );
+}
+
+#[test]
+fn test_pqc_key_with_key_encipherment_is_rejected() {
+    // ML-DSA / SLH-DSA are signature-only; asserting keyEncipherment on such a
+    // key is a contradiction and must be rejected at build time.
+    let result = CertBuilder::new()
+        .common_name("pqc-bad-ku")
+        .is_ca(false)
+        .key_type(KeyType::MlDsa65)
+        .key_usage(HashSet::from_iter([Usage::encipherment]))
+        .build_and_self_sign();
+
+    let err = result
+        .err()
+        .expect("PQC key with keyEncipherment must be rejected");
+    assert!(
+        err.to_string().contains("keyEncipherment"),
+        "error should mention keyEncipherment, got: {err}"
+    );
+}
+
+#[test]
+fn test_pqc_csr_with_key_encipherment_is_rejected() {
+    // The same guard applies on the CSR path.
+    let result = CsrBuilder::new()
+        .common_name("pqc-bad-ku-csr")
+        .key_type(KeyType::SlhDsaSha2_128s)
+        .key_usage(HashSet::from_iter([Usage::encipherment]))
+        .certificate_signing_request();
+
+    let err = result
+        .err()
+        .expect("PQC CSR with keyEncipherment must be rejected");
+    assert!(
+        err.to_string().contains("keyEncipherment"),
+        "error should mention keyEncipherment, got: {err}"
+    );
+}
+
+#[test]
+fn test_pqc_key_with_signature_usage_is_allowed() {
+    // Sanity: the guard only blocks the encryption bit — a PQC signing key with
+    // signature usage must still build successfully (no over-blocking).
+    CertBuilder::new()
+        .common_name("pqc-ok-ku")
+        .is_ca(false)
+        .key_type(KeyType::MlDsa65)
+        .key_usage(HashSet::from_iter([Usage::signature]))
+        .build_and_self_sign()
+        .expect("PQC key with signature usage should build");
 }
