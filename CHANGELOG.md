@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.6] - 2026-06-19
+
+### Added
+
+- ML-KEM (FIPS 203, formerly Kyber) key-encapsulation support behind the `pqc`
+  feature. New `KeyType` variants: `MlKem512`, `MlKem768`, `MlKem1024`
+  (OIDs `2.16.840.1.101.3.4.4.{1,2,3}`). Keys are generated via the existing
+  `openssl-sys` FFI path; requires OpenSSL ≥ 3.5 at build and runtime.
+- KeyUsage lint for ML-KEM, per draft-ietf-lamps-kyber-certificates: when an
+  ML-KEM key is used and a KeyUsage is present it must be exactly
+  `keyEncipherment` (`Usage::encipherment`) and nothing else. Any other bit
+  (`digitalSignature`, `keyAgreement`, `dataEncipherment`, `certsign`, `crlsign`)
+  is rejected on both the certificate and CSR paths.
+- Example `pqc_mlkem_issued_by_ca` showing the valid ML-KEM issuance flow.
+
+### Notes
+
+- ML-KEM is a key-encapsulation mechanism and cannot produce signatures, so an
+  ML-KEM certificate cannot be self-signed (`build_and_self_sign`) nor requested
+  via a CSR (`certificate_signing_request`) — both return an `Err`. Issue an
+  ML-KEM certificate with `build_and_sign` using a separate signing CA.
+
+### Changed
+
+- Internal: the digest-less signing helpers (`sign_certificate_digestless` /
+  `sign_x509_req_digestless`) now free the `EVP_MD_CTX` via an RAII guard
+  (`MdCtx`) instead of manual `EVP_MD_CTX_free` on each branch, making cleanup
+  panic- and refactor-safe. No public-API or behavioral change.
+
 ## [0.4.5] - 2026-06-18
 
 ### Added

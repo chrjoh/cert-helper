@@ -56,6 +56,21 @@ unsafe extern "C" {
 /// digest for ML-DSA/SLH-DSA in that path, which their providers then reject.
 /// Instead we initialise an `EVP_MD_CTX` with an explicit NULL `mdname` and
 /// hand it to `X509_sign_ctx`.
+/// RAII guard that frees an `EVP_MD_CTX` on drop, including on early return and
+/// unwind. Keeps the digest-less signing paths leak-free without manual
+/// `EVP_MD_CTX_free` on every branch. Mirrors `pqc::PkeyCtx`.
+struct MdCtx(*mut openssl_sys::EVP_MD_CTX);
+
+impl Drop for MdCtx {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: freed exactly once (on every path including unwind);
+            // EVP_MD_CTX_free is a no-op on NULL.
+            unsafe { openssl_sys::EVP_MD_CTX_free(self.0) }
+        }
+    }
+}
+
 /// Sign a just-built `X509` in-place with a digest-less key (Ed25519 or PQC).
 ///
 /// Ed25519 uses the plain `X509_sign(x, pkey, NULL)` path that has always
@@ -88,26 +103,27 @@ fn sign_certificate_digestless(
     // PQC path: EVP_DigestSignInit (non-ex) with NULL mdname + X509_sign_ctx.
     // `Signer::new_without_digest` in the openssl crate uses this exact call and
     // it works for ML-DSA/SLH-DSA whereas `EVP_DigestSignInit_ex` does not.
-    let result = unsafe {
-        let ctx = openssl_sys::EVP_MD_CTX_new();
-        if ctx.is_null() {
-            return Err("EVP_MD_CTX_new returned NULL".to_string());
-        }
-        let init = openssl_sys::EVP_DigestSignInit(
-            ctx,
+    // SAFETY: `ctx` is owned by `MdCtx` and freed on every path (early return or
+    // scope exit). The internal EVP_PKEY_CTX created by EVP_DigestSignInit (NULL
+    // pctx arg) is owned by `ctx` and released with it. `pkey_ptr`/`cert_ptr` are
+    // borrows from live wrappers and are not freed here.
+    let ctx = MdCtx(unsafe { openssl_sys::EVP_MD_CTX_new() });
+    if ctx.0.is_null() {
+        return Err("EVP_MD_CTX_new returned NULL".to_string());
+    }
+    let init = unsafe {
+        openssl_sys::EVP_DigestSignInit(
+            ctx.0,
             std::ptr::null_mut(),
             std::ptr::null(),
             std::ptr::null_mut(),
             pkey_ptr,
-        );
-        if init <= 0 {
-            openssl_sys::EVP_MD_CTX_free(ctx);
-            return Err("EVP_DigestSignInit failed for PQC key".to_string());
-        }
-        let rc = X509_sign_ctx(cert_ptr, ctx);
-        openssl_sys::EVP_MD_CTX_free(ctx);
-        rc
+        )
     };
+    if init <= 0 {
+        return Err("EVP_DigestSignInit failed for PQC key".to_string());
+    }
+    let result = unsafe { X509_sign_ctx(cert_ptr, ctx.0) };
 
     if result > 0 {
         Ok(())
@@ -135,26 +151,25 @@ fn sign_x509_req_digestless(req: &X509Req, pkey: &PKey<Private>) -> Result<(), S
         };
     }
 
-    let result = unsafe {
-        let ctx = openssl_sys::EVP_MD_CTX_new();
-        if ctx.is_null() {
-            return Err("EVP_MD_CTX_new returned NULL".to_string());
-        }
-        let init = openssl_sys::EVP_DigestSignInit(
-            ctx,
+    // SAFETY: same invariants as in `sign_certificate_digestless` — `ctx` is
+    // owned by `MdCtx` and freed on every path; `pkey_ptr`/`req_ptr` are borrows.
+    let ctx = MdCtx(unsafe { openssl_sys::EVP_MD_CTX_new() });
+    if ctx.0.is_null() {
+        return Err("EVP_MD_CTX_new returned NULL".to_string());
+    }
+    let init = unsafe {
+        openssl_sys::EVP_DigestSignInit(
+            ctx.0,
             std::ptr::null_mut(),
             std::ptr::null(),
             std::ptr::null_mut(),
             pkey_ptr,
-        );
-        if init <= 0 {
-            openssl_sys::EVP_MD_CTX_free(ctx);
-            return Err("EVP_DigestSignInit failed for PQC key".to_string());
-        }
-        let rc = X509_REQ_sign_ctx(req_ptr, ctx);
-        openssl_sys::EVP_MD_CTX_free(ctx);
-        rc
+        )
     };
+    if init <= 0 {
+        return Err("EVP_DigestSignInit failed for PQC key".to_string());
+    }
+    let result = unsafe { X509_REQ_sign_ctx(req_ptr, ctx.0) };
 
     if result > 0 {
         Ok(())
@@ -193,6 +208,50 @@ fn is_pqc_pkey(pkey: &PKey<Private>) -> bool {
             CString::new("SLH-DSA-SHA2-128s").unwrap(),
             CString::new("SLH-DSA-SHA2-192s").unwrap(),
             CString::new("SLH-DSA-SHA2-256s").unwrap(),
+        ]
+    });
+    use foreign_types::ForeignType;
+    let ptr = pkey.as_ptr();
+    names
+        .iter()
+        // SAFETY: EVP_PKEY_is_a accepts any NUL-terminated C string and a
+        // valid EVP_PKEY*; returns 0 for mismatch, 1 for match — never UB.
+        .any(|n| unsafe { pqc::EVP_PKEY_is_a(ptr, n.as_ptr()) } == 1)
+}
+
+/// FIPS 203 ML-KEM algorithm OIDs, arc `2.16.840.1.101.3.4.4.x`. These are the
+/// `id-alg-ml-kem-*` identifiers from draft-ietf-lamps-kyber-certificates that
+/// appear in an ML-KEM `SubjectPublicKeyInfo`. Detection in [`is_mlkem_pkey`] is
+/// by OpenSSL EVP algorithm name (provider-agnostic, like [`is_pqc_pkey`]); the
+/// OIDs are kept here for reference since `oid-registry` does not know them yet.
+#[cfg(feature = "pqc")]
+#[allow(dead_code)]
+const ML_KEM_OIDS: [&str; 3] = [
+    "2.16.840.1.101.3.4.4.1", // id-alg-ml-kem-512
+    "2.16.840.1.101.3.4.4.2", // id-alg-ml-kem-768
+    "2.16.840.1.101.3.4.4.3", // id-alg-ml-kem-1024
+];
+
+/// Returns true if `pkey` is an ML-KEM (FIPS 203) key-encapsulation key.
+///
+/// This is deliberately separate from [`is_pqc_pkey`]: ML-KEM keys are *not*
+/// signature keys. Per draft-ietf-lamps-kyber-certificates they may only assert
+/// the `keyEncipherment` KeyUsage bit, and they cannot produce signatures — so
+/// they can neither self-sign a certificate nor sign a CSR. Keeping them out of
+/// `is_pqc_pkey` also keeps them out of [`is_digestless_key`], which gates the
+/// signing path.
+#[cfg(feature = "pqc")]
+fn is_mlkem_pkey(pkey: &PKey<Private>) -> bool {
+    use std::ffi::CString;
+    use std::sync::OnceLock;
+
+    // Cache the CStrings so we don't rebuild them per call.
+    static NAMES: OnceLock<[CString; 3]> = OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        [
+            CString::new("ML-KEM-512").unwrap(),
+            CString::new("ML-KEM-768").unwrap(),
+            CString::new("ML-KEM-1024").unwrap(),
         ]
     });
     use foreign_types::ForeignType;
@@ -328,6 +387,20 @@ pub enum KeyType {
     /// SLH-DSA-SHA2-256s (FIPS 205). Hash-based signature, large variant.
     #[cfg(feature = "pqc")]
     SlhDsaSha2_256s,
+    /// ML-KEM-512 (FIPS 203, formerly Kyber). Post-quantum key-encapsulation
+    /// key. Encapsulation/encryption only — cannot sign. See [`KeyType`] notes
+    /// on ML-KEM: only `keyEncipherment` is a valid KeyUsage and certificates
+    /// must be issued by a separate signing CA, not self-signed.
+    #[cfg(feature = "pqc")]
+    MlKem512,
+    /// ML-KEM-768 (FIPS 203). Post-quantum key-encapsulation key. See
+    /// [`KeyType::MlKem512`].
+    #[cfg(feature = "pqc")]
+    MlKem768,
+    /// ML-KEM-1024 (FIPS 203). Post-quantum key-encapsulation key. See
+    /// [`KeyType::MlKem512`].
+    #[cfg(feature = "pqc")]
+    MlKem1024,
 }
 /// Defines which hash algorithm to be used in certificate signing
 #[derive(Debug, Clone)]
@@ -966,6 +1039,18 @@ impl CertBuilder {
     /// create a self signed x509 certificate and private key
     pub fn build_and_self_sign(&self) -> Result<Certificate, Box<dyn std::error::Error>> {
         let (mut builder, pkey) = self.prepare_x509_builder(None)?;
+
+        // ML-KEM keys cannot produce signatures, so a self-signed certificate is
+        // impossible — issue via build_and_sign() with a separate signing CA.
+        #[cfg(feature = "pqc")]
+        if is_mlkem_pkey(&pkey) {
+            return Err("ML-KEM (FIPS 203) is a key-encapsulation key and cannot \
+                produce signatures, so it cannot self-sign a certificate. Issue an \
+                ML-KEM certificate with CertBuilder::build_and_sign() using a signing \
+                CA (e.g. an ML-DSA or ECDSA CA) instead."
+                .into());
+        }
+
         let ca_cert: X509 = if is_digestless_key(&pkey) {
             let build_cert = builder.build();
             sign_certificate_digestless(&build_cert, &pkey)
@@ -1068,6 +1153,24 @@ impl CertBuilder {
                     post-quantum signature key (ML-DSA / SLH-DSA): these algorithms are \
                     signature-only and cannot perform key encipherment. Use Usage::signature \
                     (and certsign/crlsign for a CA) instead."
+                    .into());
+            }
+        }
+
+        // ML-KEM (FIPS 203) is a key-encapsulation key. Per
+        // draft-ietf-lamps-kyber-certificates, when an ML-KEM key appears in the
+        // SPKI and KeyUsage is present it MUST assert keyEncipherment and nothing
+        // else (no digitalSignature, keyAgreement, dataEncipherment, etc.).
+        #[cfg(feature = "pqc")]
+        {
+            if is_mlkem_pkey(&pkey)
+                && !key_usage.is_empty()
+                && key_usage != HashSet::from([Usage::encipherment])
+            {
+                return Err("an ML-KEM (FIPS 203) key may only assert keyEncipherment \
+                    (Usage::encipherment) in its KeyUsage — no other bit is permitted \
+                    (no digitalSignature, keyAgreement, dataEncipherment, certsign, or \
+                    crlsign). Set key_usage to exactly {Usage::encipherment}, or omit it."
                     .into());
             }
         }
@@ -1232,6 +1335,34 @@ impl CsrBuilder {
                     instead."
                     .into());
             }
+        }
+
+        // ML-KEM keyEncipherment-only lint (see prepare_x509_builder for the
+        // rationale). Checked before the can't-sign guard below so a contradictory
+        // KeyUsage is reported precisely.
+        #[cfg(feature = "pqc")]
+        {
+            if is_mlkem_pkey(&pkey)
+                && !key_usage.is_empty()
+                && key_usage != HashSet::from([Usage::encipherment])
+            {
+                return Err("an ML-KEM (FIPS 203) key may only assert keyEncipherment \
+                    (Usage::encipherment) in its KeyUsage — no other bit is permitted \
+                    (no digitalSignature, keyAgreement, dataEncipherment, certsign, or \
+                    crlsign). Set key_usage to exactly {Usage::encipherment}, or omit it."
+                    .into());
+            }
+        }
+
+        // ML-KEM cannot sign, and a PKCS#10 CSR requires a self-signature for
+        // proof-of-possession — so an ML-KEM CSR cannot be produced here.
+        #[cfg(feature = "pqc")]
+        if is_mlkem_pkey(&pkey) {
+            return Err("ML-KEM (FIPS 203) is a key-encapsulation key and cannot sign \
+                a CSR (PKCS#10 requires a self-signature for proof-of-possession). \
+                Issue the ML-KEM certificate directly with CertBuilder::build_and_sign() \
+                using a signing CA instead."
+                .into());
         }
 
         let mut extensions = Stack::new()?;
@@ -1471,6 +1602,12 @@ fn select_key(key_type: &Option<KeyType>) -> Result<PKey<Private>, ErrorStack> {
         Some(KeyType::SlhDsaSha2_192s) => generate_pqc_key("SLH-DSA-SHA2-192s"),
         #[cfg(feature = "pqc")]
         Some(KeyType::SlhDsaSha2_256s) => generate_pqc_key("SLH-DSA-SHA2-256s"),
+        #[cfg(feature = "pqc")]
+        Some(KeyType::MlKem512) => generate_pqc_key("ML-KEM-512"),
+        #[cfg(feature = "pqc")]
+        Some(KeyType::MlKem768) => generate_pqc_key("ML-KEM-768"),
+        #[cfg(feature = "pqc")]
+        Some(KeyType::MlKem1024) => generate_pqc_key("ML-KEM-1024"),
         Some(KeyType::RSA4096) => {
             let rsa = Rsa::generate(4096)?;
             PKey::from_rsa(rsa)

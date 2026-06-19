@@ -218,6 +218,128 @@ fn test_pqc_csr_with_key_encipherment_is_rejected() {
 }
 
 #[test]
+fn test_mlkem_self_sign_is_rejected() {
+    // ML-KEM is a KEM, not a signature scheme, so it cannot self-sign.
+    let result = CertBuilder::new()
+        .common_name("mlkem-self")
+        .key_type(KeyType::MlKem768)
+        .build_and_self_sign();
+
+    let err = result
+        .err()
+        .expect("ML-KEM must not be allowed to self-sign");
+    assert!(
+        err.to_string().contains("ML-KEM"),
+        "error should mention ML-KEM, got: {err}"
+    );
+}
+
+#[test]
+fn test_mlkem_csr_is_rejected() {
+    // A PKCS#10 CSR needs a self-signature for proof-of-possession, which an
+    // ML-KEM key cannot produce.
+    let result = CsrBuilder::new()
+        .common_name("mlkem-csr")
+        .key_type(KeyType::MlKem512)
+        .key_usage(HashSet::from_iter([Usage::encipherment]))
+        .certificate_signing_request();
+
+    let err = result.err().expect("ML-KEM CSR must be rejected");
+    assert!(
+        err.to_string().contains("ML-KEM"),
+        "error should mention ML-KEM, got: {err}"
+    );
+}
+
+#[test]
+fn test_classical_ca_signs_mlkem_cert_with_encipherment() {
+    // The valid issuance path: a signing CA issues an ML-KEM certificate whose
+    // SPKI is ML-KEM-768 and whose only KeyUsage bit is keyEncipherment.
+    let ca = CertBuilder::new()
+        .common_name("My Classical Ca")
+        .is_ca(true)
+        .build_and_self_sign()
+        .unwrap();
+
+    let leaf = CertBuilder::new()
+        .common_name("mlkem-leaf")
+        .is_ca(false)
+        .key_type(KeyType::MlKem768)
+        .key_usage(HashSet::from_iter([Usage::encipherment]))
+        .build_and_sign(&ca)
+        .expect("classical CA must issue an ML-KEM certificate");
+
+    let der = leaf.x509.to_der().unwrap();
+    let (_, parsed) = parse_x509_certificate(&der).unwrap();
+
+    let spki_alg = parsed
+        .tbs_certificate
+        .subject_pki
+        .algorithm
+        .algorithm
+        .to_id_string();
+    assert_eq!(
+        spki_alg, "2.16.840.1.101.3.4.4.2",
+        "leaf SPKI should be ML-KEM-768 OID"
+    );
+
+    let ku = parsed
+        .tbs_certificate
+        .key_usage()
+        .expect("KeyUsage parse")
+        .expect("KeyUsage present");
+    assert!(ku.value.key_encipherment(), "keyEncipherment must be set");
+    assert!(
+        !ku.value.digital_signature(),
+        "digitalSignature must not be set"
+    );
+}
+
+#[test]
+fn test_mlkem_cert_with_signature_usage_is_rejected() {
+    // ML-KEM may only assert keyEncipherment — any other bit is a contradiction.
+    let ca = CertBuilder::new()
+        .common_name("My Classical Ca")
+        .is_ca(true)
+        .build_and_self_sign()
+        .unwrap();
+
+    let result = CertBuilder::new()
+        .common_name("mlkem-bad-ku")
+        .is_ca(false)
+        .key_type(KeyType::MlKem768)
+        .key_usage(HashSet::from_iter([Usage::signature]))
+        .build_and_sign(&ca);
+
+    let err = result
+        .err()
+        .expect("ML-KEM with non-encipherment usage must be rejected");
+    assert!(
+        err.to_string().contains("keyEncipherment"),
+        "error should mention keyEncipherment, got: {err}"
+    );
+}
+
+#[test]
+fn test_mlkem_csr_with_bad_usage_reports_keyencipherment() {
+    // On the CSR path the keyEncipherment-only lint runs before the can't-sign
+    // guard, so a contradictory KeyUsage is reported precisely.
+    let result = CsrBuilder::new()
+        .common_name("mlkem-csr-bad-ku")
+        .key_type(KeyType::MlKem1024)
+        .key_usage(HashSet::from_iter([Usage::signature]))
+        .certificate_signing_request();
+
+    let err = result
+        .err()
+        .expect("ML-KEM CSR with non-encipherment usage must be rejected");
+    assert!(
+        err.to_string().contains("keyEncipherment"),
+        "error should mention keyEncipherment, got: {err}"
+    );
+}
+
+#[test]
 fn test_pqc_key_with_signature_usage_is_allowed() {
     // Sanity: the guard only blocks the encryption bit — a PQC signing key with
     // signature usage must still build successfully (no over-blocking).

@@ -1,6 +1,6 @@
 [package]
 name = "cert-helper"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2024"
 authors = ["Christer Johansson"]
 autobins = false
@@ -42,6 +42,11 @@ required-features = ["pqc"]
 [[example]]
 name = "pqc_crl_example"
 path = "examples/pqc_crl_example.rs"
+required-features = ["pqc"]
+
+[[example]]
+name = "pqc_mlkem_issued_by_ca"
+path = "examples/pqc_mlkem_issued_by_ca.rs"
 required-features = ["pqc"]
 
 [features]

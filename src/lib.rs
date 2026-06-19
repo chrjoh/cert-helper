@@ -23,6 +23,49 @@
 //!   - Note that this is a simple crl parser that only handle the fields that are included then
 //!     generating a crl with this code
 //!
+//! ### Post-Quantum keys (experimental)
+//!
+//! Build with `--features pqc` to enable NIST-standardized post-quantum
+//! algorithms as new `KeyType` variants. There are two distinct families with
+//! different roles and **different KeyUsage rules** — the library enforces these at
+//! build time on both the certificate and CSR paths.
+//!
+//! **Signature keys** — FIPS 204 / FIPS 205. These sign; they cannot encrypt.
+//!
+//! - `MlDsa44`, `MlDsa65`, `MlDsa87` — FIPS 204 (ML-DSA, formerly Dilithium)
+//! - `SlhDsaSha2_128s`, `SlhDsaSha2_192s`, `SlhDsaSha2_256s` — FIPS 205 (SLH-DSA, formerly SPHINCS+)
+//!
+//!   - **KeyUsage:** use `digitalSignature` (`Usage::signature`), plus
+//!     `keyCertSign`/`cRLSign` (`Usage::certsign` / `Usage::crlsign`) for a CA.
+//!   - **Restriction:** `keyEncipherment` (`Usage::encipherment`) is **rejected** —
+//!     these algorithms are signature-only and cannot perform key encipherment.
+//!   - Can self-sign, sign CSRs, sign other certificates, and sign CRLs.
+//!
+//! **Key-encapsulation keys** — FIPS 203. These encapsulate (encrypt); they cannot sign.
+//!
+//! - `MlKem512`, `MlKem768`, `MlKem1024` — FIPS 203 (ML-KEM, formerly Kyber),
+//!   OIDs `2.16.840.1.101.3.4.4.{1,2,3}`
+//!
+//!   - **KeyUsage:** if KeyUsage is present it MUST be **exactly `keyEncipherment`**
+//!     (`Usage::encipherment`) and nothing else — per
+//!     [draft-ietf-lamps-kyber-certificates]. Any other bit (`digitalSignature`,
+//!     `keyAgreement`, `dataEncipherment`, `keyCertSign`, `cRLSign`) is **rejected**.
+//!     Although ML-KEM is a Key Encapsulation Mechanism, the LAMPS group modeled it
+//!     like RSA key transport, so it lands on `keyEncipherment`, not `keyAgreement`.
+//!   - **Restriction:** ML-KEM cannot produce signatures, so it can be neither
+//!     self-signed (`build_and_self_sign`) nor used to sign a CSR
+//!     (`certificate_signing_request`) — both return an error. Issue an ML-KEM
+//!     certificate via `build_and_sign()` with a separate signing CA (e.g. an
+//!     ML-DSA or ECDSA CA).
+//!
+//! **Runtime requirement:** OpenSSL **≥ 3.5** at build and runtime (enforced at
+//! `build.rs` time) — this covers both the FIPS 204/205 signature algorithms and
+//! FIPS 203 ML-KEM. The `openssl`
+//! Rust crate does not yet expose safe high-level wrappers for these algorithms —
+//! this implementation uses `openssl-sys` FFI directly, mirroring the Ed25519
+//! digest-less signing path. Availability and stability track upstream; expect
+//! churn until safe bindings land.
+//!
 //! ### Certificate Signing Requirements
 //! To sign another certificate, the signing certificate must:
 //! - Have the `CA` (Certificate Authority) flag set to `true`
