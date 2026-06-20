@@ -1,6 +1,29 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [0.4.7] - 2026-06-20
+
+### Added
+
+- Certificate Policies (`id-ce-certificatePolicies`, OID `2.5.29.32`) support.
+  New `CertificatePolicy` enum with named variants for the CA/Browser Forum
+  reserved OIDs — `DomainValidated` (`2.23.140.1.2.1`), `OrganizationValidated`
+  (`2.23.140.1.2.2`), `IndividualValidated` (`2.23.140.1.2.3`),
+  `ExtendedValidation` (`2.23.140.1.1`), `AnyPolicy` (`2.5.29.32.0`) — plus an
+  `Other(String)` escape hatch for private or arbitrary policy OIDs.
+- `CertBuilder::certificate_policies(Vec<CertificatePolicy>)` — adds the
+  certificatePolicies extension to directly-built certificates
+  (`build_and_sign` / `build_and_self_sign`).
+- `CsrOptions::certificate_policies(Vec<CertificatePolicy>)` — sets the policies
+  when issuing a certificate from a CSR (`build_signed_certificate`). The policy
+  is **issuer-set** at signing time, not taken from the requester's CSR.
+
+### Notes
+
+- Policies are opt-in: with none set, no certificatePolicies extension is
+  emitted (unchanged output for existing callers).
+- Only bare policy OIDs are encoded; policy qualifiers (CPS URI / user notice)
+  are not yet supported. A malformed `Other(..)` OID fails at build time.
 
 ## [0.4.6] - 2026-06-19
 
