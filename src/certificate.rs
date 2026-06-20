@@ -20,11 +20,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::Path;
-
 use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
 use x509_parser::prelude::FromDer;
+use yasna::models::ObjectIdentifier;
 
 unsafe extern "C" {
     pub fn X509_sign(
@@ -50,6 +50,28 @@ unsafe extern "C" {
     ) -> ::std::os::raw::c_int;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertificatePolicy {
+    DomainValidated,       // 2.23.140.1.2.1
+    OrganizationValidated, // 2.23.140.1.2.2
+    IndividualValidated,   // 2.23.140.1.2.3
+    ExtendedValidation,    // 2.23.140.1.1
+    AnyPolicy,             // 2.5.29.32.0
+    Other(String),         // private / arbitrary / test OID
+}
+
+impl CertificatePolicy {
+    pub fn oid(&self) -> &str {
+        match self {
+            Self::DomainValidated => "2.23.140.1.2.1",
+            Self::OrganizationValidated => "2.23.140.1.2.2",
+            Self::IndividualValidated => "2.23.140.1.2.3",
+            Self::ExtendedValidation => "2.23.140.1.1",
+            Self::AnyPolicy => "2.5.29.32.0",
+            Self::Other(oid) => oid,
+        }
+    }
+}
 /// Sign a just-built `X509` in-place with a digest-less key (Ed25519 or PQC).
 ///
 /// We avoid `X509_sign(x, pkey, NULL)` because OpenSSL 3.5+ infers a default
@@ -742,6 +764,7 @@ impl Csr {
         let ski_asn1 = Asn1OctetString::new_from_bytes(&der_encoded)?;
         let ext = X509Extension::new_from_der(oid.as_ref(), false, &ski_asn1)?;
         builder.append_extension(ext)?;
+
         let cert: X509 = if is_digestless_key(signer.pkey.as_ref().unwrap()) {
             let builder_cert = builder.build();
             sign_certificate_digestless(&builder_cert, signer.pkey.as_ref().unwrap())
@@ -820,6 +843,7 @@ pub trait BuilderCommon {
     fn set_key_type(&mut self, key_type: KeyType);
     fn set_signature_alg(&mut self, signature_alg: HashAlg);
     fn set_key_usage(&mut self, key_usage: HashSet<Usage>);
+    fn set_policys(&mut self, policys: Vec<CertificatePolicy>);
 }
 
 /// Stores common configurable fields used during X509 certificate or CSR generation.
@@ -836,6 +860,7 @@ pub struct BuilderFields {
     key_type: Option<KeyType>,
     signature_alg: Option<HashAlg>,
     usage: Option<HashSet<Usage>>,
+    policies: Vec<CertificatePolicy>,
 }
 impl BuilderCommon for BuilderFields {
     // Sets the common name, CN. This value will also be added to alternaitve_names
@@ -892,6 +917,9 @@ impl BuilderCommon for BuilderFields {
             }
         };
     }
+    fn set_policys(&mut self, policies: Vec<CertificatePolicy>) {
+        self.policies = policies;
+    }
 }
 
 impl Default for BuilderFields {
@@ -909,6 +937,7 @@ impl Default for BuilderFields {
             key_type: Default::default(),
             signature_alg: Default::default(),
             usage: Default::default(),
+            policies: Default::default(),
         }
     }
 }
@@ -1004,6 +1033,10 @@ impl CertBuilder {
             valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
             ca: false,
         }
+    }
+    pub fn certificate_policies(mut self, policies: Vec<CertificatePolicy>) -> Self {
+        self.fields.policies = policies;
+        self
     }
     /// Sets the start date from which the certificate should be valid.
     ///
@@ -1143,7 +1176,29 @@ impl CertBuilder {
         }
 
         let key_usage = self.fields.usage.clone().unwrap_or_default();
+        if !self.fields.policies.is_empty() {
+            let oids = self
+                .fields
+                .policies
+                .iter()
+                .map(|p| parse_oid(p.oid()))
+                .collect::<Result<Vec<_>, _>>()?; // <-- errors propagate here, not in the closure
 
+            let der = yasna::construct_der(|writer| {
+                writer.write_sequence(|seq| {
+                    for oid in &oids {
+                        seq.next().write_sequence(|pi| {
+                            pi.next().write_oid(oid);
+                        });
+                    }
+                });
+            });
+
+            let oid = Asn1Object::from_str("2.5.29.32")?; // id-ce-certificatePolicies
+            let value = Asn1OctetString::new_from_bytes(&der)?;
+            let ext = X509Extension::new_from_der(oid.as_ref(), false, &value)?;
+            builder.append_extension(ext)?;
+        }
         // Post-quantum signature keys (ML-DSA / SLH-DSA) are signature-only and
         // cannot perform key encipherment; reject the contradictory combination.
         #[cfg(feature = "pqc")]
@@ -1358,11 +1413,13 @@ impl CsrBuilder {
         // proof-of-possession — so an ML-KEM CSR cannot be produced here.
         #[cfg(feature = "pqc")]
         if is_mlkem_pkey(&pkey) {
-            return Err("ML-KEM (FIPS 203) is a key-encapsulation key and cannot sign \
+            return Err(
+                "ML-KEM (FIPS 203) is a key-encapsulation key and cannot sign \
                 a CSR (PKCS#10 requires a self-signature for proof-of-possession). \
                 Issue the ML-KEM certificate directly with CertBuilder::build_and_sign() \
                 using a signing CA instead."
-                .into());
+                    .into(),
+            );
         }
 
         let mut extensions = Stack::new()?;
@@ -1475,7 +1532,15 @@ impl TrackedKeyUsage {
         self.inner
     }
 }
-
+/// Parse a dotted OID string into a yasna ObjectIdentifier.
+fn parse_oid(dotted: &str) -> Result<ObjectIdentifier, Box<dyn std::error::Error>> {
+    let components = dotted
+        .split('.')
+        .map(|c| c.parse::<u64>())
+        .collect::<Result<Vec<u64>, _>>()
+        .map_err(|_| format!("invalid policy OID: {dotted}"))?;
+    Ok(ObjectIdentifier::new(components))
+}
 /// Verifies a certificate against a root certificate and the intermediate
 /// chain leading up to it.
 /// Note: The root certificate should not be included in the chain.

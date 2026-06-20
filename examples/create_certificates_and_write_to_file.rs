@@ -1,6 +1,6 @@
 use cert_helper::certificate::{
-    CertBuilder, Certificate, CsrBuilder, CsrOptions, HashAlg, KeyType, Usage, UseesBuilderFields,
-    X509Common, verify_cert,
+    CertBuilder, Certificate, CertificatePolicy, CsrBuilder, CsrOptions, HashAlg, KeyType, Usage,
+    UseesBuilderFields, X509Common, verify_cert,
 };
 use std::fs;
 
@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .key_type(KeyType::Ed25519)
         .signature_alg(HashAlg::SHA512)
         .alternative_names(vec!["ca.com", "www.ca.com"])
+        .certificate_policies(vec![CertificatePolicy::AnyPolicy])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
     let root_cert = ca.build_and_self_sign()?;
     root_cert.save("./certs/", "ed_ca")?;
@@ -36,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .key_type(KeyType::Ed25519)
         .signature_alg(HashAlg::SHA512)
         .alternative_names(vec!["ca.com", "www.ca.com"])
+        .certificate_policies(vec![CertificatePolicy::AnyPolicy])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
     let root_cert = ca.build_and_self_sign()?;
     root_cert.save("./certs/", "mytestca")?;
@@ -52,6 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .organization("my org")
         .is_ca(true)
         .alternative_names(vec!["example.com", "www.example.com"])
+        .certificate_policies(vec![CertificatePolicy::AnyPolicy])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
 
     let middle_cert = middle.build_and_sign(&ca_cert)?;
@@ -63,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .state_province("Stockholm")
         .organization("My org")
         .locality_time("Stockholm")
+        .certificate_policies(vec![CertificatePolicy::DomainValidated])
         .alternative_names(vec!["example2.com", "www.example2.com"])
         .key_usage(
             [
@@ -111,6 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .is_ca(true)
         .key_type(KeyType::P521)
         .signature_alg(HashAlg::SHA512)
+        .certificate_policies(vec![CertificatePolicy::AnyPolicy])
         .alternative_names(vec!["ca.com", "www.ca.com"])
         .key_usage([Usage::certsign, Usage::crlsign].into_iter().collect());
     let root_cert = ca.build_and_self_sign()?;

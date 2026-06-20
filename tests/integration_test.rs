@@ -1,6 +1,6 @@
 use cert_helper::certificate::{
-    CertBuilder, Certificate, CsrBuilder, CsrOptions, HashAlg, KeyType, Usage, UseesBuilderFields,
-    create_cert_chain_from_cert_list, verify_cert,
+    CertBuilder, Certificate, CertificatePolicy, CsrBuilder, CsrOptions, HashAlg, KeyType, Usage,
+    UseesBuilderFields, create_cert_chain_from_cert_list, verify_cert,
 };
 use cert_helper::crl::{CrlReason, X509CrlBuilder, X509CrlWrapper};
 use chrono::Utc;
@@ -27,6 +27,26 @@ fn create_minimal_self_signed_cert() -> Result<(), Box<dyn std::error::Error>> {
             "Missing Certificate Sign or CRL Sign usage or basic const. not critical".into(),
         );
     }
+    Ok(())
+}
+
+#[test]
+fn ensure_certificate_policy_is_present() -> Result<(), Box<dyn std::error::Error>> {
+    let ca = CertBuilder::new()
+        .common_name("My Test Ca")
+        .is_ca(true)
+        .certificate_policies(vec![CertificatePolicy::AnyPolicy]);
+    let root_cert = ca.build_and_self_sign()?;
+    let x509 = root_cert.x509;
+    let text = String::from_utf8(x509.to_text()?)?;
+    assert!(
+        text.contains("X509v3 Certificate Policies"),
+        "certificatePolicies extension missing:\n{text}"
+    );
+    assert!(
+        text.contains("Any Policy"),
+        "AnyPolicy not rendered:\n{text}"
+    );
     Ok(())
 }
 
