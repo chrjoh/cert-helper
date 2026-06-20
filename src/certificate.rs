@@ -50,6 +50,12 @@ unsafe extern "C" {
     ) -> ::std::os::raw::c_int;
 }
 
+/// A certificate policy OID found in the `certificatePolicies` extension.
+///
+/// The named variants are the CA/Browser Forum reserved policy identifiers
+/// (arc `2.23.140.1`) that signal the validation level a publicly-trusted CA
+/// performed before issuance, plus the special `anyPolicy` OID from RFC 5280.
+/// Anything outside that set is preserved verbatim in [`CertificatePolicy::Other`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CertificatePolicy {
     DomainValidated,       // 2.23.140.1.2.1
@@ -61,6 +67,10 @@ pub enum CertificatePolicy {
 }
 
 impl CertificatePolicy {
+    /// Returns the policy's OID in dotted-decimal notation.
+    ///
+    /// For named variants this is a fixed `&'static str`; for
+    /// [`CertificatePolicy::Other`] it borrows the stored OID string.
     pub fn oid(&self) -> &str {
         match self {
             Self::DomainValidated => "2.23.140.1.2.1",
@@ -626,6 +636,10 @@ impl CsrOptions {
         self.ca = ca;
         self
     }
+    /// Add optional certificate policies
+    ///
+    /// # Arguments
+    /// * `policies` - A list of certificate policies
     pub fn certificate_policies(mut self, policies: Vec<CertificatePolicy>) -> Self {
         self.policies = policies;
         self
@@ -1036,6 +1050,10 @@ impl CertBuilder {
             policies: Default::default(),
         }
     }
+    /// Add optional certificate policies
+    ///
+    /// # Arguments
+    /// * `policies` - A list of certificate policies
     pub fn certificate_policies(mut self, policies: Vec<CertificatePolicy>) -> Self {
         self.policies = policies;
         self
