@@ -576,6 +576,7 @@ pub struct CsrOptions {
     valid_to: Asn1Time,
     valid_from: Asn1Time,
     ca: bool,
+    policies: Vec<CertificatePolicy>,
 }
 impl Default for CsrOptions {
     fn default() -> Self {
@@ -593,6 +594,7 @@ impl CsrOptions {
             ca: false,
             valid_from: Asn1Time::days_from_now(0).unwrap(), // today
             valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
+            policies: Default::default(),
         }
     }
 
@@ -622,6 +624,10 @@ impl CsrOptions {
     /// * `ca` - `true` if the certificate should be a CA, `false` otherwise.
     pub fn is_ca(mut self, ca: bool) -> Self {
         self.ca = ca;
+        self
+    }
+    pub fn certificate_policies(mut self, policies: Vec<CertificatePolicy>) -> Self {
+        self.policies = policies;
         self
     }
 }
@@ -764,7 +770,7 @@ impl Csr {
         let ski_asn1 = Asn1OctetString::new_from_bytes(&der_encoded)?;
         let ext = X509Extension::new_from_der(oid.as_ref(), false, &ski_asn1)?;
         builder.append_extension(ext)?;
-
+        append_certificate_policies(&mut builder, &options.policies)?;
         let cert: X509 = if is_digestless_key(signer.pkey.as_ref().unwrap()) {
             let builder_cert = builder.build();
             sign_certificate_digestless(&builder_cert, signer.pkey.as_ref().unwrap())
@@ -843,7 +849,6 @@ pub trait BuilderCommon {
     fn set_key_type(&mut self, key_type: KeyType);
     fn set_signature_alg(&mut self, signature_alg: HashAlg);
     fn set_key_usage(&mut self, key_usage: HashSet<Usage>);
-    fn set_policys(&mut self, policys: Vec<CertificatePolicy>);
 }
 
 /// Stores common configurable fields used during X509 certificate or CSR generation.
@@ -860,7 +865,6 @@ pub struct BuilderFields {
     key_type: Option<KeyType>,
     signature_alg: Option<HashAlg>,
     usage: Option<HashSet<Usage>>,
-    policies: Vec<CertificatePolicy>,
 }
 impl BuilderCommon for BuilderFields {
     // Sets the common name, CN. This value will also be added to alternaitve_names
@@ -917,9 +921,6 @@ impl BuilderCommon for BuilderFields {
             }
         };
     }
-    fn set_policys(&mut self, policies: Vec<CertificatePolicy>) {
-        self.policies = policies;
-    }
 }
 
 impl Default for BuilderFields {
@@ -937,7 +938,6 @@ impl Default for BuilderFields {
             key_type: Default::default(),
             signature_alg: Default::default(),
             usage: Default::default(),
-            policies: Default::default(),
         }
     }
 }
@@ -1010,6 +1010,7 @@ pub struct CertBuilder {
     fields: BuilderFields,
     valid_from: Asn1Time,
     valid_to: Asn1Time,
+    policies: Vec<CertificatePolicy>,
     ca: bool,
 }
 
@@ -1032,10 +1033,11 @@ impl CertBuilder {
             valid_from: Asn1Time::days_from_now(0).unwrap(), // today
             valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
             ca: false,
+            policies: Default::default(),
         }
     }
     pub fn certificate_policies(mut self, policies: Vec<CertificatePolicy>) -> Self {
-        self.fields.policies = policies;
+        self.policies = policies;
         self
     }
     /// Sets the start date from which the certificate should be valid.
@@ -1176,29 +1178,7 @@ impl CertBuilder {
         }
 
         let key_usage = self.fields.usage.clone().unwrap_or_default();
-        if !self.fields.policies.is_empty() {
-            let oids = self
-                .fields
-                .policies
-                .iter()
-                .map(|p| parse_oid(p.oid()))
-                .collect::<Result<Vec<_>, _>>()?; // <-- errors propagate here, not in the closure
-
-            let der = yasna::construct_der(|writer| {
-                writer.write_sequence(|seq| {
-                    for oid in &oids {
-                        seq.next().write_sequence(|pi| {
-                            pi.next().write_oid(oid);
-                        });
-                    }
-                });
-            });
-
-            let oid = Asn1Object::from_str("2.5.29.32")?; // id-ce-certificatePolicies
-            let value = Asn1OctetString::new_from_bytes(&der)?;
-            let ext = X509Extension::new_from_der(oid.as_ref(), false, &value)?;
-            builder.append_extension(ext)?;
-        }
+        append_certificate_policies(&mut builder, &self.policies)?;
         // Post-quantum signature keys (ML-DSA / SLH-DSA) are signature-only and
         // cannot perform key encipherment; reject the contradictory combination.
         #[cfg(feature = "pqc")]
@@ -1541,6 +1521,31 @@ fn parse_oid(dotted: &str) -> Result<ObjectIdentifier, Box<dyn std::error::Error
         .map_err(|_| format!("invalid policy OID: {dotted}"))?;
     Ok(ObjectIdentifier::new(components))
 }
+
+fn append_certificate_policies(
+    builder: &mut X509Builder,
+    policies: &[CertificatePolicy],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if policies.is_empty() {
+        return Ok(());
+    }
+    let oids = policies
+        .iter()
+        .map(|p| parse_oid(p.oid()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let der = yasna::construct_der(|w| {
+        w.write_sequence(|seq| {
+            for oid in &oids {
+                seq.next().write_sequence(|pi| pi.next().write_oid(oid));
+            }
+        });
+    });
+    let oid = Asn1Object::from_str("2.5.29.32")?;
+    let value = Asn1OctetString::new_from_bytes(&der)?;
+    builder.append_extension(X509Extension::new_from_der(oid.as_ref(), false, &value)?)?;
+    Ok(())
+}
+
 /// Verifies a certificate against a root certificate and the intermediate
 /// chain leading up to it.
 /// Note: The root certificate should not be included in the chain.

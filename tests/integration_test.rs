@@ -509,7 +509,10 @@ fn create_signed_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>
     let root_cert = ca.build_and_self_sign()?;
     let csr_builder = CsrBuilder::new().common_name("example2.com");
     let csr = csr_builder.certificate_signing_request()?;
-    let cert = csr.build_signed_certificate(&root_cert, CsrOptions::new())?;
+    let cert = csr.build_signed_certificate(
+        &root_cert,
+        CsrOptions::new().certificate_policies(vec![CertificatePolicy::DomainValidated]),
+    )?;
 
     assert_eq!(
         get_clean_subject_name(&cert.x509),
@@ -524,6 +527,15 @@ fn create_signed_certificate_from_csr() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(
         cert.x509.authority_key_id().unwrap().as_slice(),
         root_cert.x509.subject_key_id().unwrap().as_slice()
+    );
+    let text = String::from_utf8(cert.x509.to_text()?)?;
+    assert!(
+        text.contains("X509v3 Certificate Policies"),
+        "certificatePolicies extension missing:\n{text}"
+    );
+    assert!(
+        text.contains("Policy: 2.23.140.1.2.1"),
+        "DomainValidation not rendered:\n{text}"
     );
     Ok(())
 }
