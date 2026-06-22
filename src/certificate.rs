@@ -661,14 +661,20 @@ impl Csr {
         signer: &Certificate,
         options: CsrOptions,
     ) -> Result<Certificate, Box<dyn std::error::Error>> {
-        let can_sign = can_sign_cert(&signer.x509)?;
+        let can_sign = can_sign_cert(signer)?;
         if !can_sign {
             let err = format!(
-                "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:{:?}",
-                signer.x509.issuer_name()
+                "Cannot sign with signer certificate {:?}: it must be a valid CA \
+                 (BasicConstraints CA flag set, KeyUsage keyCertSign, within its validity \
+                 period) and have an associated private key",
+                signer.x509.subject_name()
             );
             return Err(err.into());
         }
+        let signer_key = signer
+            .pkey
+            .as_ref()
+            .ok_or("signer certificate has no associated private key; cannot sign")?;
         let mut builder = X509Builder::new()?;
         builder.set_version(2)?;
         builder.set_subject_name(self.csr.subject_name())?;
@@ -785,13 +791,13 @@ impl Csr {
         let ext = X509Extension::new_from_der(oid.as_ref(), false, &ski_asn1)?;
         builder.append_extension(ext)?;
         append_certificate_policies(&mut builder, &options.policies)?;
-        let cert: X509 = if is_digestless_key(signer.pkey.as_ref().unwrap()) {
+        let cert: X509 = if is_digestless_key(signer_key) {
             let builder_cert = builder.build();
-            sign_certificate_digestless(&builder_cert, signer.pkey.as_ref().unwrap())
+            sign_certificate_digestless(&builder_cert, signer_key)
                 .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
             builder_cert
         } else {
-            builder.sign(signer.pkey.as_ref().unwrap(), MessageDigest::sha256())?;
+            builder.sign(signer_key, MessageDigest::sha256())?;
             builder.build()
         };
 
@@ -1124,16 +1130,21 @@ impl CertBuilder {
         &self,
         signer: &Certificate,
     ) -> Result<Certificate, Box<dyn std::error::Error>> {
-        let can_sign = can_sign_cert(&signer.x509)?;
+        let can_sign = can_sign_cert(signer)?;
         if !can_sign {
             let err = format!(
-                "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:{:?}",
-                signer.x509.issuer_name()
+                "Cannot sign with signer certificate {:?}: it must be a valid CA \
+                 (BasicConstraints CA flag set, KeyUsage keyCertSign, within its validity \
+                 period) and have an associated private key",
+                signer.x509.subject_name()
             );
             return Err(err.into());
         }
         let (mut builder, pkey) = self.prepare_x509_builder(Some(signer))?;
-        let signer_key = signer.pkey.as_ref().unwrap();
+        let signer_key = signer
+            .pkey
+            .as_ref()
+            .ok_or("signer certificate has no associated private key; cannot sign")?;
         let cert: X509 = if is_digestless_key(signer_key) {
             let build_cert = builder.build();
             sign_certificate_digestless(&build_cert, signer_key)
@@ -1750,19 +1761,19 @@ fn get_key_usage(usage: &Option<HashSet<Usage>>) -> (TrackedKeyUsage, TrackedExt
     (ku, eku)
 }
 
-fn can_sign_cert(cert: &X509) -> Result<bool, Box<dyn std::error::Error>> {
-    let der = cert.to_der()?;
+fn can_sign_cert(cert: &Certificate) -> Result<bool, Box<dyn std::error::Error>> {
+    if cert.pkey.is_none() {
+        return Ok(false);
+    }
+
+    let der = cert.x509.to_der()?;
     let (_, parsed_cert) = parse_x509_certificate(&der)?;
 
     let mut is_ca = false;
     let mut can_sign = false;
-
-    // Compare the validity window using OpenSSL's native ASN.1 time comparison
-    // instead of a panic-prone string round-trip through chrono: `not_before`
-    // must be at or before now, and now must be strictly before `not_after`.
     let now = Asn1Time::days_from_now(0)?;
-    let valid_time = cert.not_before().compare(&now)? != std::cmp::Ordering::Greater
-        && cert.not_after().compare(&now)? == std::cmp::Ordering::Greater;
+    let valid_time = cert.x509.not_before().compare(&now)? != std::cmp::Ordering::Greater
+        && cert.x509.not_after().compare(&now)? == std::cmp::Ordering::Greater;
 
     for ext in parsed_cert.tbs_certificate.extensions().iter() {
         match &ext.parsed_extension() {
@@ -1784,6 +1795,29 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn build_and_sign_without_signer_private_key_errors_not_panics() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        let keyless_ca = Certificate {
+            x509: ca.x509.clone(),
+            pkey: None,
+        };
+
+        let err = CertBuilder::new()
+            .common_name("leaf")
+            .build_and_sign(&keyless_ca)
+            .err()
+            .expect("signing with a key-less CA must return an error, not panic");
+        assert!(
+            err.to_string().contains("private key"),
+            "expected a missing-private-key error, got: {err}"
+        );
+    }
 
     #[test]
     fn save_certificate() {
