@@ -1,6 +1,14 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [0.4.8] -
+
+### Changed
+- Add validation that a certificate signing request with PQC key and 
+  keyEncipherment key usage do not return a signed certificate
+- Added so that the public key in the Certificate signing request is 
+  validated before a certificate is generated
+
 ## [0.4.7] - 2026-06-20
 
 ### Added
