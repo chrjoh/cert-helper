@@ -226,7 +226,7 @@ pub(crate) fn is_digestless_key(pkey: &PKey<Private>) -> bool {
 }
 
 #[cfg(feature = "pqc")]
-fn is_pqc_pkey(pkey: &PKey<Private>) -> bool {
+fn is_pqc_pkey<T>(pkey: &PKey<T>) -> bool {
     use std::ffi::CString;
     use std::sync::OnceLock;
 
@@ -273,7 +273,7 @@ const ML_KEM_OIDS: [&str; 3] = [
 /// `is_pqc_pkey` also keeps them out of [`is_digestless_key`], which gates the
 /// signing path.
 #[cfg(feature = "pqc")]
-fn is_mlkem_pkey(pkey: &PKey<Private>) -> bool {
+fn is_mlkem_pkey<T>(pkey: &PKey<T>) -> bool {
     use std::ffi::CString;
     use std::sync::OnceLock;
 
@@ -304,8 +304,8 @@ fn is_mlkem_pkey(pkey: &PKey<Private>) -> bool {
 ///
 /// Returns `Ok(())` for non-PQC keys and for conformant combinations.
 #[cfg(feature = "pqc")]
-fn validate_pqc_key_usage(
-    pkey: &PKey<Private>,
+fn validate_pqc_key_usage<T>(
+    pkey: &PKey<T>,
     key_usage: &HashSet<Usage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if is_pqc_pkey(pkey) && key_usage.contains(&Usage::encipherment) {
@@ -742,6 +742,7 @@ impl Csr {
 
         let req_ext = parsed_csr.1.requested_extensions();
         let mut any_key_used = false;
+        let mut requested: HashSet<Usage> = HashSet::new();
         if let Some(exts) = req_ext {
             for ext in exts {
                 match ext {
@@ -752,20 +753,25 @@ impl Csr {
                         let mut usage = openssl::x509::extension::KeyUsage::new();
                         if ku.digital_signature() {
                             usage.digital_signature();
+                            requested.insert(Usage::signature);
                         }
                         if ku.key_encipherment() {
                             usage.key_encipherment();
+                            requested.insert(Usage::encipherment);
                         }
                         if ku.key_cert_sign() {
                             cert_sign_added = true;
                             usage.key_cert_sign();
+                            requested.insert(Usage::certsign);
                         }
                         if ku.non_repudiation() {
                             usage.non_repudiation();
+                            requested.insert(Usage::contentcommitment);
                         }
                         if ku.crl_sign() {
                             crl_sign_added = true;
                             usage.crl_sign();
+                            requested.insert(Usage::crlsign);
                         }
 
                         if options.ca {
@@ -812,6 +818,9 @@ impl Csr {
                 }
             }
         }
+        #[cfg(feature = "pqc")]
+        validate_pqc_key_usage(&csr_public_key, &requested)?;
+
         if options.ca {
             builder.append_extension(BasicConstraints::new().ca().critical().build()?)?;
             if !any_key_used {
@@ -1872,6 +1881,42 @@ mod tests {
         assert!(
             err.to_string().contains("private key"),
             "expected a missing-private-key error, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn do_not_allow_csr_with_pqc_key_and_encipherment_to_generate_certificate() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+
+        let pkey = generate_pqc_key("ML-DSA-65").unwrap();
+        let mut builder = X509ReqBuilder::new().unwrap();
+        builder
+            .set_pubkey(&pkey)
+            .expect("failed to set public key in csr");
+        let mut exts = Stack::new().unwrap();
+        exts.push(KeyUsage::new().key_encipherment().build().unwrap())
+            .unwrap();
+        builder.set_version(0).unwrap();
+        builder.add_extensions(&exts).unwrap();
+        let req = builder.build();
+
+        let _ = sign_x509_req_digestless(&req, &pkey);
+        let csr = Csr {
+            csr: req,
+            pkey: None,
+        };
+        let err = csr
+            .build_signed_certificate(&ca, CsrOptions::new())
+            .err()
+            .expect("a PQC signature key requesting keyEncipherment must be rejected");
+        assert!(
+            err.to_string().contains("keyEncipherment"),
+            "expected a keyEncipherment error, got: {err}"
         );
     }
 
