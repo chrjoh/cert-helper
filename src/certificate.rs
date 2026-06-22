@@ -295,6 +295,57 @@ fn is_mlkem_pkey(pkey: &PKey<Private>) -> bool {
         .any(|n| unsafe { pqc::EVP_PKEY_is_a(ptr, n.as_ptr()) } == 1)
 }
 
+/// Validate a post-quantum key against the KeyUsage it is being given.
+///
+/// Shared by certificate and CSR construction so the rules live in one place:
+/// - ML-DSA / SLH-DSA are signature-only — `keyEncipherment` is rejected.
+/// - ML-KEM is key-encapsulation-only — if a KeyUsage is present it must be
+///   exactly `keyEncipherment` (per draft-ietf-lamps-kyber-certificates).
+///
+/// Returns `Ok(())` for non-PQC keys and for conformant combinations.
+#[cfg(feature = "pqc")]
+fn validate_pqc_key_usage(
+    pkey: &PKey<Private>,
+    key_usage: &HashSet<Usage>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if is_pqc_pkey(pkey) && key_usage.contains(&Usage::encipherment) {
+        return Err("keyEncipherment (Usage::encipherment) is not valid for a \
+            post-quantum signature key (ML-DSA / SLH-DSA): these algorithms are \
+            signature-only and cannot perform key encipherment. Use Usage::signature \
+            (and certsign/crlsign for a CA) instead."
+            .into());
+    }
+
+    if is_mlkem_pkey(pkey)
+        && !key_usage.is_empty()
+        && *key_usage != HashSet::from([Usage::encipherment])
+    {
+        return Err("an ML-KEM (FIPS 203) key may only assert keyEncipherment \
+            (Usage::encipherment) in its KeyUsage — no other bit is permitted \
+            (no digitalSignature, keyAgreement, dataEncipherment, certsign, or \
+            crlsign). Set key_usage to exactly {Usage::encipherment}, or omit it."
+            .into());
+    }
+
+    Ok(())
+}
+
+/// Reject signing operations that an ML-KEM key cannot perform.
+///
+/// ML-KEM is a key-encapsulation mechanism and cannot produce signatures, so it
+/// can neither self-sign a certificate nor sign a CSR. `message` lets the caller
+/// supply the context-specific guidance. Returns `Ok(())` for any non-ML-KEM key.
+#[cfg(feature = "pqc")]
+fn reject_mlkem_signing(
+    pkey: &PKey<Private>,
+    message: &'static str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if is_mlkem_pkey(pkey) {
+        return Err(message.into());
+    }
+    Ok(())
+}
+
 #[cfg(feature = "pqc")]
 mod pqc {
     use foreign_types::ForeignType;
@@ -1102,13 +1153,13 @@ impl CertBuilder {
         // ML-KEM keys cannot produce signatures, so a self-signed certificate is
         // impossible — issue via build_and_sign() with a separate signing CA.
         #[cfg(feature = "pqc")]
-        if is_mlkem_pkey(&pkey) {
-            return Err("ML-KEM (FIPS 203) is a key-encapsulation key and cannot \
-                produce signatures, so it cannot self-sign a certificate. Issue an \
-                ML-KEM certificate with CertBuilder::build_and_sign() using a signing \
-                CA (e.g. an ML-DSA or ECDSA CA) instead."
-                .into());
-        }
+        reject_mlkem_signing(
+            &pkey,
+            "ML-KEM (FIPS 203) is a key-encapsulation key and cannot produce \
+             signatures, so it cannot self-sign a certificate. Issue an ML-KEM \
+             certificate with CertBuilder::build_and_sign() using a signing CA \
+             (e.g. an ML-DSA or ECDSA CA) instead.",
+        )?;
 
         let ca_cert: X509 = if is_digestless_key(&pkey) {
             let build_cert = builder.build();
@@ -1208,36 +1259,10 @@ impl CertBuilder {
 
         let key_usage = self.fields.usage.clone().unwrap_or_default();
         append_certificate_policies(&mut builder, &self.policies)?;
-        // Post-quantum signature keys (ML-DSA / SLH-DSA) are signature-only and
-        // cannot perform key encipherment; reject the contradictory combination.
+        // Enforce post-quantum KeyUsage rules (signature-only ML-DSA/SLH-DSA vs
+        // keyEncipherment-only ML-KEM). See validate_pqc_key_usage.
         #[cfg(feature = "pqc")]
-        {
-            if is_pqc_pkey(&pkey) && key_usage.contains(&Usage::encipherment) {
-                return Err("keyEncipherment (Usage::encipherment) is not valid for a \
-                    post-quantum signature key (ML-DSA / SLH-DSA): these algorithms are \
-                    signature-only and cannot perform key encipherment. Use Usage::signature \
-                    (and certsign/crlsign for a CA) instead."
-                    .into());
-            }
-        }
-
-        // ML-KEM (FIPS 203) is a key-encapsulation key. Per
-        // draft-ietf-lamps-kyber-certificates, when an ML-KEM key appears in the
-        // SPKI and KeyUsage is present it MUST assert keyEncipherment and nothing
-        // else (no digitalSignature, keyAgreement, dataEncipherment, etc.).
-        #[cfg(feature = "pqc")]
-        {
-            if is_mlkem_pkey(&pkey)
-                && !key_usage.is_empty()
-                && key_usage != HashSet::from([Usage::encipherment])
-            {
-                return Err("an ML-KEM (FIPS 203) key may only assert keyEncipherment \
-                    (Usage::encipherment) in its KeyUsage — no other bit is permitted \
-                    (no digitalSignature, keyAgreement, dataEncipherment, certsign, or \
-                    crlsign). Set key_usage to exactly {Usage::encipherment}, or omit it."
-                    .into());
-            }
-        }
+        validate_pqc_key_usage(&pkey, &key_usage)?;
 
         if self.ca {
             builder.append_extension(BasicConstraints::new().ca().critical().build()?)?;
@@ -1388,48 +1413,21 @@ impl CsrBuilder {
         builder.set_pubkey(&pkey)?;
         let key_usage = self.fields.usage.clone().unwrap_or_default();
 
-        // Post-quantum signature keys (ML-DSA / SLH-DSA) cannot perform key
-        // encipherment; reject the contradictory combination in CSRs too.
+        // Enforce post-quantum KeyUsage rules. Run before the can't-sign guard
+        // below so a contradictory KeyUsage is reported precisely.
         #[cfg(feature = "pqc")]
-        {
-            if is_pqc_pkey(&pkey) && key_usage.contains(&Usage::encipherment) {
-                return Err("keyEncipherment (Usage::encipherment) is not valid for a \
-                    post-quantum signature key (ML-DSA / SLH-DSA): these algorithms are \
-                    signature-only and cannot perform key encipherment. Use Usage::signature \
-                    instead."
-                    .into());
-            }
-        }
-
-        // ML-KEM keyEncipherment-only lint (see prepare_x509_builder for the
-        // rationale). Checked before the can't-sign guard below so a contradictory
-        // KeyUsage is reported precisely.
-        #[cfg(feature = "pqc")]
-        {
-            if is_mlkem_pkey(&pkey)
-                && !key_usage.is_empty()
-                && key_usage != HashSet::from([Usage::encipherment])
-            {
-                return Err("an ML-KEM (FIPS 203) key may only assert keyEncipherment \
-                    (Usage::encipherment) in its KeyUsage — no other bit is permitted \
-                    (no digitalSignature, keyAgreement, dataEncipherment, certsign, or \
-                    crlsign). Set key_usage to exactly {Usage::encipherment}, or omit it."
-                    .into());
-            }
-        }
+        validate_pqc_key_usage(&pkey, &key_usage)?;
 
         // ML-KEM cannot sign, and a PKCS#10 CSR requires a self-signature for
         // proof-of-possession — so an ML-KEM CSR cannot be produced here.
         #[cfg(feature = "pqc")]
-        if is_mlkem_pkey(&pkey) {
-            return Err(
-                "ML-KEM (FIPS 203) is a key-encapsulation key and cannot sign \
-                a CSR (PKCS#10 requires a self-signature for proof-of-possession). \
-                Issue the ML-KEM certificate directly with CertBuilder::build_and_sign() \
-                using a signing CA instead."
-                    .into(),
-            );
-        }
+        reject_mlkem_signing(
+            &pkey,
+            "ML-KEM (FIPS 203) is a key-encapsulation key and cannot sign a CSR \
+             (PKCS#10 requires a self-signature for proof-of-possession). Issue the \
+             ML-KEM certificate directly with CertBuilder::build_and_sign() using a \
+             signing CA instead.",
+        )?;
 
         let mut extensions = Stack::new()?;
 
