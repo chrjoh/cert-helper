@@ -712,6 +712,10 @@ impl Csr {
         signer: &Certificate,
         options: CsrOptions,
     ) -> Result<Certificate, Box<dyn std::error::Error>> {
+        // Proof-of-possession: refuse to issue from a CSR whose self-signature
+        // does not verify against its own public key.
+        verify_csr_proof_of_possession(&self.csr)?;
+
         let can_sign = can_sign_cert(signer)?;
         if !can_sign {
             let err = format!(
@@ -1759,6 +1763,24 @@ fn get_key_usage(usage: &Option<HashSet<Usage>>) -> (TrackedKeyUsage, TrackedExt
     (ku, eku)
 }
 
+/// Verify a CSR's proof-of-possession.
+///
+/// A PKCS#10 request is self-signed with the private key matching its own public
+/// key; a valid signature proves the requester possesses that private key. We
+/// verify the request signature against its embedded public key and refuse to
+/// issue a certificate from a request that fails
+fn verify_csr_proof_of_possession(csr: &X509Req) -> Result<(), Box<dyn std::error::Error>> {
+    let public_key = csr.public_key()?;
+    if !csr.verify(&public_key)? {
+        return Err(
+            "CSR proof-of-possession check failed: the request signature does \
+            not verify against its own public key"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn can_sign_cert(cert: &Certificate) -> Result<bool, Box<dyn std::error::Error>> {
     if cert.pkey.is_none() {
         return Ok(false);
@@ -1793,6 +1815,42 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn build_signed_certificate_rejects_csr_with_bad_proof_of_possession() {
+        // A CSR whose self-signature does not match its public key (proof-of-
+        // possession failure) must be refused, not turned into a certificate.
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+
+        let good = CsrBuilder::new()
+            .common_name("leaf")
+            .certificate_signing_request()
+            .unwrap();
+
+        // Flip the last byte of the DER — the tail of the signature BIT STRING —
+        // so the request no longer verifies against its own public key while
+        // staying structurally parseable.
+        let mut der = good.csr.to_der().unwrap();
+        let last = der.len() - 1;
+        der[last] ^= 0xFF;
+        let tampered = Csr {
+            csr: X509Req::from_der(&der).unwrap(),
+            pkey: None,
+        };
+
+        let err = tampered
+            .build_signed_certificate(&ca, CsrOptions::new())
+            .err()
+            .expect("CSR with broken proof-of-possession must be rejected");
+        assert!(
+            err.to_string().contains("proof-of-possession"),
+            "expected a proof-of-possession error, got: {err}"
+        );
+    }
 
     #[test]
     fn build_and_sign_without_signer_private_key_errors_not_panics() {
