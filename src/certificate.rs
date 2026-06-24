@@ -638,6 +638,7 @@ pub struct CsrOptions {
     valid_from: Asn1Time,
     ca: bool,
     policies: Vec<CertificatePolicy>,
+    path_len: Option<u32>,
 }
 impl Default for CsrOptions {
     fn default() -> Self {
@@ -656,6 +657,7 @@ impl CsrOptions {
             valid_from: Asn1Time::days_from_now(0).unwrap(), // today
             valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
             policies: Default::default(),
+            path_len: None,
         }
     }
 
@@ -693,6 +695,15 @@ impl CsrOptions {
     /// * `policies` - A list of certificate policies
     pub fn certificate_policies(mut self, policies: Vec<CertificatePolicy>) -> Self {
         self.policies = policies;
+        self
+    }
+    /// Add optional path length, it is the max number of **non-self-issued
+    /// intermediate CA certs** that may follow this cert in a chain
+    ///
+    /// # Arguments
+    /// * `path_len`- u32
+    pub fn pathlen(mut self, path_len: u32) -> Self {
+        self.path_len = Some(path_len);
         self
     }
 }
@@ -822,7 +833,8 @@ impl Csr {
         validate_pqc_key_usage(&csr_public_key, &requested)?;
 
         if options.ca {
-            builder.append_extension(BasicConstraints::new().ca().critical().build()?)?;
+            let result = ca_basic_constraints(options.path_len)?;
+            builder.append_extension(result)?;
             if !any_key_used {
                 let key_usage = KeyUsage::new().key_cert_sign().crl_sign().build().unwrap();
                 builder.append_extension(key_usage)?;
@@ -1096,6 +1108,7 @@ pub struct CertBuilder {
     valid_to: Asn1Time,
     policies: Vec<CertificatePolicy>,
     ca: bool,
+    path_len: Option<u32>,
 }
 
 impl UseesBuilderFields for CertBuilder {
@@ -1118,6 +1131,7 @@ impl CertBuilder {
             valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
             ca: false,
             policies: Default::default(),
+            path_len: None,
         }
     }
     /// Add optional certificate policies
@@ -1156,6 +1170,15 @@ impl CertBuilder {
             self.fields
                 .set_key_usage(HashSet::from([Usage::certsign, Usage::crlsign]));
         }
+        self
+    }
+    /// Add optional path length, it is the max number of **non-self-issued
+    /// intermediate CA certs** that may follow this cert in a chain
+    ///
+    /// # Arguments
+    /// * `path_len`- u32
+    pub fn pathlen(mut self, path_len: u32) -> Self {
+        self.path_len = Some(path_len);
         self
     }
 
@@ -1278,7 +1301,8 @@ impl CertBuilder {
         validate_pqc_key_usage(&pkey, &key_usage)?;
 
         if self.ca {
-            builder.append_extension(BasicConstraints::new().ca().critical().build()?)?;
+            let result = ca_basic_constraints(self.path_len)?;
+            builder.append_extension(result)?;
         } else {
             builder.append_extension(BasicConstraints::new().build()?)?;
         }
@@ -1562,6 +1586,15 @@ fn parse_oid(dotted: &str) -> Result<ObjectIdentifier, Box<dyn std::error::Error
     Ok(ObjectIdentifier::new(components))
 }
 
+fn ca_basic_constraints(path_len: Option<u32>) -> Result<X509Extension, ErrorStack> {
+    let mut bc = BasicConstraints::new();
+    bc.ca().critical();
+    if let Some(len) = path_len {
+        bc.pathlen(len);
+    }
+    bc.build()
+}
+
 fn append_certificate_policies(
     builder: &mut X509Builder,
     policies: &[CertificatePolicy],
@@ -1824,6 +1857,88 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn create_ca_with_path_len_set() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_self_sign()
+            .unwrap();
+        assert_eq!(ca.x509.pathlen(), Some(0));
+    }
+
+    #[test]
+    fn create_ca_with_no_path_len_set() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        assert_eq!(ca.x509.pathlen(), None);
+    }
+
+    #[test]
+    fn create_cert_chain_and_verify() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_self_sign()
+            .unwrap();
+        let inter_ca = CertBuilder::new()
+            .common_name("My Test inter Ca")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_sign(&ca)
+            .unwrap();
+        let leaf = CertBuilder::new()
+            .common_name("My Test leaf")
+            .build_and_sign(&inter_ca)
+            .unwrap();
+        assert_eq!(ca.x509.pathlen(), Some(1));
+        assert_eq!(leaf.x509.pathlen(), None);
+        assert!(verify_cert(&leaf.x509, &ca.x509, vec![&inter_ca.x509]).unwrap());
+    }
+
+    #[test]
+    fn create_ca_cert_from_csr_with_path_len() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(2)
+            .build_and_self_sign()
+            .unwrap();
+
+        let csr = CsrBuilder::new()
+            .common_name("leaf")
+            .certificate_signing_request()
+            .unwrap();
+        let cert = csr
+            .build_signed_certificate(&ca, CsrOptions::new().pathlen(1).is_ca(true))
+            .unwrap();
+        assert_eq!(cert.x509.pathlen(), Some(1));
+    }
+
+    #[test]
+    fn create_non_ca_cert_from_csr_with_path_len() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(2)
+            .build_and_self_sign()
+            .unwrap();
+
+        let csr = CsrBuilder::new()
+            .common_name("leaf")
+            .certificate_signing_request()
+            .unwrap();
+        let cert = csr
+            .build_signed_certificate(&ca, CsrOptions::new().pathlen(1))
+            .unwrap();
+        assert_eq!(cert.x509.pathlen(), None);
+    }
 
     #[test]
     fn build_signed_certificate_rejects_csr_with_bad_proof_of_possession() {
