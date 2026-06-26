@@ -1995,6 +1995,55 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_chain_without_root_is_rejected() {
+        let ca = CertBuilder::new()
+            .common_name("Root")
+            .is_ca(true)
+            .pathlen(2)
+            .build_and_self_sign()
+            .unwrap();
+        let inter = CertBuilder::new()
+            .common_name("Inter")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_sign_with_chain(&ca, &[])
+            .unwrap();
+
+        // sign with `inter` but forget to pass its chain → top of chain is `inter`,
+        // which is not self-signed → reject
+        let err = CertBuilder::new()
+            .common_name("Sub")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_sign_with_chain(&inter, &[])
+            .err()
+            .expect("incomplete chain (missing root) must be rejected");
+        assert!(
+            err.to_string().contains("Could not find self signed root"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn unlimited_root_can_issue_ca() {
+        let root = CertBuilder::new()
+            .common_name("Unlimited Root")
+            .is_ca(true) // note: no .pathlen() → None / unlimited
+            .build_and_self_sign()
+            .unwrap();
+        assert_eq!(root.x509.pathlen(), None);
+
+        // budget is None → no ceiling; even a large declared pathLen is fine
+        let inter = CertBuilder::new()
+            .common_name("Inter")
+            .is_ca(true)
+            .pathlen(5)
+            .build_and_sign_with_chain(&root, &[])
+            .unwrap();
+        assert_eq!(inter.x509.pathlen(), Some(5));
+    }
+
+    #[test]
     fn create_cert_chain_and_verify() {
         let ca = CertBuilder::new()
             .common_name("My Test Ca")
