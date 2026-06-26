@@ -19,6 +19,7 @@ use openssl::x509::{
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, create_dir_all};
 use std::io::Write;
+use std::marker::PhantomData;
 use std::path::Path;
 use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::ParsedExtension;
@@ -49,6 +50,9 @@ unsafe extern "C" {
         ctx: *mut openssl_sys::EVP_MD_CTX,
     ) -> ::std::os::raw::c_int;
 }
+
+pub struct PathLenUnset;
+pub struct PathLenSet;
 
 /// A certificate policy OID found in the `certificatePolicies` extension.
 ///
@@ -1102,16 +1106,17 @@ pub trait UseesBuilderFields: Sized {
 }
 
 /// Builder for creating a new certificate and private key
-pub struct CertBuilder {
+pub struct CertBuilder<P = PathLenUnset> {
     fields: BuilderFields,
     valid_from: Asn1Time,
     valid_to: Asn1Time,
     policies: Vec<CertificatePolicy>,
     ca: bool,
     path_len: Option<u32>,
+    _marker: PhantomData<P>,
 }
 
-impl UseesBuilderFields for CertBuilder {
+impl<P> UseesBuilderFields for CertBuilder<P> {
     fn fields_mut(&mut self) -> &mut BuilderFields {
         &mut self.fields
     }
@@ -1122,18 +1127,7 @@ impl Default for CertBuilder {
     }
 }
 
-impl CertBuilder {
-    /// Create a new CertBuilder with defaults and one year from now as valid date
-    pub fn new() -> Self {
-        Self {
-            fields: BuilderFields::default(),
-            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
-            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
-            ca: false,
-            policies: Default::default(),
-            path_len: None,
-        }
-    }
+impl<P> CertBuilder<P> {
     /// Add optional certificate policies
     ///
     /// # Arguments
@@ -1177,9 +1171,16 @@ impl CertBuilder {
     ///
     /// # Arguments
     /// * `path_len`- u32
-    pub fn pathlen(mut self, path_len: u32) -> Self {
-        self.path_len = Some(path_len);
-        self
+    pub fn pathlen(self, path_len: u32) -> CertBuilder<PathLenSet> {
+        CertBuilder {
+            fields: self.fields,
+            valid_from: self.valid_from,
+            valid_to: self.valid_to,
+            policies: self.policies,
+            ca: self.ca,
+            path_len: Some(path_len),
+            _marker: PhantomData,
+        }
     }
 
     /// create a self signed x509 certificate and private key
@@ -1209,40 +1210,6 @@ impl CertBuilder {
 
         Ok(Certificate {
             x509: ca_cert,
-            pkey: Some(pkey),
-        })
-    }
-    /// Create a signed certificate and private key
-    pub fn build_and_sign(
-        &self,
-        signer: &Certificate,
-    ) -> Result<Certificate, Box<dyn std::error::Error>> {
-        let can_sign = can_sign_cert(signer)?;
-        if !can_sign {
-            let err = format!(
-                "Cannot sign with signer certificate {:?}: it must be a valid CA \
-                 (BasicConstraints CA flag set, KeyUsage keyCertSign, within its validity \
-                 period) and have an associated private key",
-                signer.x509.subject_name()
-            );
-            return Err(err.into());
-        }
-        let (mut builder, pkey) = self.prepare_x509_builder(Some(signer))?;
-        let signer_key = signer
-            .pkey
-            .as_ref()
-            .ok_or("signer certificate has no associated private key; cannot sign")?;
-        let cert: X509 = if is_digestless_key(signer_key) {
-            let build_cert = builder.build();
-            sign_certificate_digestless(&build_cert, signer_key)
-                .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
-            build_cert
-        } else {
-            builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
-            builder.build()
-        };
-        Ok(Certificate {
-            x509: cert,
             pkey: Some(pkey),
         })
     }
@@ -1371,6 +1338,100 @@ impl CertBuilder {
     }
 }
 
+impl CertBuilder<PathLenUnset> {
+    /// Create a new CertBuilder with defaults and one year from now as valid date
+    pub fn new() -> Self {
+        Self {
+            fields: BuilderFields::default(),
+            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
+            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
+            ca: false,
+            policies: Default::default(),
+            path_len: None,
+            _marker: PhantomData,
+        }
+    }
+    /// Create a signed certificate and private key
+    pub fn build_and_sign(
+        &self,
+        signer: &Certificate,
+    ) -> Result<Certificate, Box<dyn std::error::Error>> {
+        let can_sign = can_sign_cert(signer)?;
+        if !can_sign {
+            let err = format!(
+                "Cannot sign with signer certificate {:?}: it must be a valid CA \
+             (BasicConstraints CA flag set, KeyUsage keyCertSign, within its validity \
+             period) and have an associated private key",
+                signer.x509.subject_name()
+            );
+            return Err(err.into());
+        }
+        let (mut builder, pkey) = self.prepare_x509_builder(Some(signer))?;
+        let signer_key = signer
+            .pkey
+            .as_ref()
+            .ok_or("signer certificate has no associated private key; cannot sign")?;
+        let cert: X509 = if is_digestless_key(signer_key) {
+            let build_cert = builder.build();
+            sign_certificate_digestless(&build_cert, signer_key)
+                .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
+            build_cert
+        } else {
+            builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
+            builder.build()
+        };
+        Ok(Certificate {
+            x509: cert,
+            pkey: Some(pkey),
+        })
+    }
+}
+
+impl CertBuilder<PathLenSet> {
+    pub fn build_and_sign_with_chain(
+        &self,
+        signer: &Certificate,
+        chain: &[&X509],
+    ) -> Result<Certificate, Box<dyn std::error::Error>> {
+        let can_sign = can_sign_cert(signer)?;
+        if !can_sign {
+            let err = format!(
+                "Cannot sign with signer certificate {:?}: it must be a valid CA \
+             (BasicConstraints CA flag set, KeyUsage keyCertSign, within its validity \
+             period) and have an associated private key",
+                signer.x509.subject_name()
+            );
+            return Err(err.into());
+        }
+        if self.ca {
+            let budget = verify_cert_path(signer, chain)?; // Option<u32>
+            if let (Some(b), Some(m)) = (budget, self.path_len) {
+                if m >= b {
+                    return Err("requested pathLen exceeds what the signer's chain permits".into());
+                }
+            }
+        }
+
+        let (mut builder, pkey) = self.prepare_x509_builder(Some(signer))?;
+        let signer_key = signer
+            .pkey
+            .as_ref()
+            .ok_or("signer certificate has no associated private key; cannot sign")?;
+        let cert: X509 = if is_digestless_key(signer_key) {
+            let build_cert = builder.build();
+            sign_certificate_digestless(&build_cert, signer_key)
+                .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
+            build_cert
+        } else {
+            builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
+            builder.build()
+        };
+        Ok(Certificate {
+            x509: cert,
+            pkey: Some(pkey),
+        })
+    }
+}
 /// Builder for creating a new certificate signing request and private key
 pub struct CsrBuilder {
     fields: BuilderFields,
@@ -1665,7 +1726,11 @@ pub fn create_cert_chain_from_cert_list(
     }
 
     // Find leaf certificates (those that are not issuers of any other cert)
-    let all_issuers: Vec<Vec<u8>> = issuer_map.values().cloned().collect();
+    let all_issuers: Vec<Vec<u8>> = issuer_map
+        .iter()
+        .filter(|(subject, issuer)| subject != issuer) // ignore the self-signed self-reference
+        .map(|(_, issuer)| issuer.clone())
+        .collect();
     let leaf_certs: Vec<X509> = subject_map
         .iter()
         .filter(|(subject, _)| !all_issuers.contains(subject))
@@ -1805,6 +1870,56 @@ fn get_key_usage(usage: &Option<HashSet<Usage>>) -> (TrackedKeyUsage, TrackedExt
     (ku, eku)
 }
 
+fn verify_cert_path(
+    signer: &Certificate,
+    chain: &[&X509],
+) -> Result<Option<u32>, Box<dyn std::error::Error>> {
+    let mut owned: Vec<X509> = chain.iter().map(|c| (*c).clone()).collect();
+    owned.push(signer.x509.clone());
+    let ordered = create_cert_chain_from_cert_list(owned)?;
+    let root = ordered.first().unwrap();
+    let pubkey = root.public_key()?;
+    if !root.verify(&pubkey)? {
+        let err = format!(
+            "Could not find self signed root, found last ancestor {:?}",
+            root.subject_name()
+        );
+        return Err(err.into());
+    }
+    let signer = ordered.last().unwrap();
+    let intermediates: Vec<&X509> = ordered
+        .get(1..ordered.len().saturating_sub(1)) // 1..0 → None for len==1
+        .unwrap_or(&[])
+        .iter()
+        .collect();
+    match verify_cert(signer, root, intermediates) {
+        Ok(true) => {
+            let mut budget: Option<i64> = None;
+            for (d, ancestor) in ordered.iter().rev().enumerate() {
+                if let Some(p) = ancestor.pathlen() {
+                    // ancestor's declared pathLen
+                    let candidate = p as i64 - d as i64; // can be negative — that's fine
+                    budget = Some(budget.map_or(candidate, |b| b.min(candidate)));
+                }
+            }
+            match budget {
+                Some(b) if b < 1 => {
+                    Err("signer's path length budget is exhausted; cannot issue a CA".into())
+                }
+                Some(b) => Ok(Some(b as u32)), // b >= 1 here, cast is safe
+                None => Ok(None),              // no pathLen anywhere → unlimited
+            }
+        }
+        _ => {
+            let err = format!(
+                "Cannot verify the crtificate chain for {:?}",
+                signer.subject_name()
+            );
+            return Err(err.into());
+        }
+    }
+}
+
 /// Verify a CSR's proof-of-possession.
 ///
 /// A PKCS#10 request is self-signed with the private key matching its own public
@@ -1887,11 +2002,12 @@ mod tests {
             .pathlen(1)
             .build_and_self_sign()
             .unwrap();
+        let chain: Vec<&X509> = Vec::new();
         let inter_ca = CertBuilder::new()
             .common_name("My Test inter Ca")
             .is_ca(true)
             .pathlen(0)
-            .build_and_sign(&ca)
+            .build_and_sign_with_chain(&ca, chain.as_slice())
             .unwrap();
         let leaf = CertBuilder::new()
             .common_name("My Test leaf")
@@ -1902,6 +2018,88 @@ mod tests {
         assert!(verify_cert(&leaf.x509, &ca.x509, vec![&inter_ca.x509]).unwrap());
     }
 
+    #[test]
+    fn create_ca_cert_chain_and_verify() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(2)
+            .build_and_self_sign()
+            .unwrap();
+        let chain: Vec<&X509> = Vec::new();
+        let inter_ca = CertBuilder::new()
+            .common_name("My Test inter Ca")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_sign_with_chain(&ca, chain.as_slice())
+            .unwrap();
+        let leaf = CertBuilder::new()
+            .common_name("leaf ca")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_sign_with_chain(&inter_ca, &vec![&ca.x509])
+            .unwrap();
+
+        assert_eq!(leaf.x509.pathlen(), Some(0));
+    }
+
+    #[test]
+    fn can_not_create_ca_cert_chain_with_wrong_intermediate_ca_path() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(2)
+            .build_and_self_sign()
+            .unwrap();
+        let chain: Vec<&X509> = Vec::new();
+        let inter_ca = CertBuilder::new()
+            .common_name("My Test inter Ca")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_sign_with_chain(&ca, chain.as_slice())
+            .unwrap();
+        let err = CertBuilder::new()
+            .common_name("leaf ca")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_sign_with_chain(&inter_ca, &vec![&ca.x509])
+            .err()
+            .expect("");
+
+        assert!(
+            err.to_string()
+                .contains("signer's path length budget is exhausted; cannot issue a CA"),
+            "signer's path length budget is exhausted; cannot issue a CA got: {err}"
+        );
+    }
+
+    #[test]
+    fn root_ca_have_one_path_length_and_can_not_sign_ca() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_self_sign()
+            .unwrap();
+
+        let chain: Vec<&X509> = Vec::new();
+
+        // A user mistake: an intermediate claiming pathlen(1) under a root that only
+        // permits one CA below it. Must be rejected at issuance.
+        let err = CertBuilder::new()
+            .common_name("My Test inter Ca")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_sign_with_chain(&ca, chain.as_slice())
+            .err()
+            .expect("inter CA with pathlen(1) under root pathlen(1) must be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("requested pathLen exceeds what the signer's chain permits"),
+            "expected a pathLen-exceeds error, got: {err}"
+        );
+    }
     #[test]
     fn create_ca_cert_from_csr_with_path_len() {
         let ca = CertBuilder::new()
