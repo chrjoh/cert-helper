@@ -1,3 +1,7 @@
+#[cfg(feature = "pqc")]
+use super::key::{is_mlkem_pkey, is_pqc_pkey};
+#[cfg(feature = "pqc")]
+use openssl::pkey::PKey;
 use openssl::x509::extension::{ExtendedKeyUsage, KeyUsage};
 use std::collections::HashSet;
 /// Represents the allowed usages for a certificate, used in KeyUsage and ExtendedKeyUsage extensions.
@@ -133,4 +137,39 @@ pub(crate) fn get_key_usage(
     }
 
     (ku, eku)
+}
+
+/// Validate a post-quantum key against the KeyUsage it is being given.
+///
+/// Shared by certificate and CSR construction so the rules live in one place:
+/// - ML-DSA / SLH-DSA are signature-only — `keyEncipherment` is rejected.
+/// - ML-KEM is key-encapsulation-only — if a KeyUsage is present it must be
+///   exactly `keyEncipherment` (per draft-ietf-lamps-kyber-certificates).
+///
+/// Returns `Ok(())` for non-PQC keys and for conformant combinations.
+#[cfg(feature = "pqc")]
+pub(crate) fn validate_pqc_key_usage<T>(
+    pkey: &PKey<T>,
+    key_usage: &HashSet<Usage>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if is_pqc_pkey(pkey) && key_usage.contains(&Usage::encipherment) {
+        return Err("keyEncipherment (Usage::encipherment) is not valid for a \
+            post-quantum signature key (ML-DSA / SLH-DSA): these algorithms are \
+            signature-only and cannot perform key encipherment. Use Usage::signature \
+            (and certsign/crlsign for a CA) instead."
+            .into());
+    }
+
+    if is_mlkem_pkey(pkey)
+        && !key_usage.is_empty()
+        && *key_usage != HashSet::from([Usage::encipherment])
+    {
+        return Err("an ML-KEM (FIPS 203) key may only assert keyEncipherment \
+            (Usage::encipherment) in its KeyUsage — no other bit is permitted \
+            (no digitalSignature, keyAgreement, dataEncipherment, certsign, or \
+            crlsign). Set key_usage to exactly {Usage::encipherment}, or omit it."
+            .into());
+    }
+
+    Ok(())
 }

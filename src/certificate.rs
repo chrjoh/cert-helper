@@ -7,7 +7,7 @@ pub use csr::{Csr, CsrBuilder, CsrOptions, CsrX509Common};
 pub use key::KeyType;
 pub(crate) use key::is_digestless_key;
 #[cfg(feature = "pqc")]
-use key::{is_mlkem_pkey, is_pqc_pkey, reject_mlkem_signing};
+use key::reject_mlkem_signing;
 use key::{select_key, sign_certificate_digestless};
 use openssl::asn1::{Asn1Object, Asn1OctetString, Asn1Time};
 use openssl::bn::BigNum;
@@ -29,46 +29,13 @@ use std::marker::PhantomData;
 use std::path::Path;
 pub use usage::Usage; // keeps cert_helper::certificate::Usage
 use usage::get_key_usage;
+#[cfg(feature = "pqc")]
+use usage::validate_pqc_key_usage;
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
 
 pub struct PathLenUnset;
 pub struct PathLenSet;
-
-/// Validate a post-quantum key against the KeyUsage it is being given.
-///
-/// Shared by certificate and CSR construction so the rules live in one place:
-/// - ML-DSA / SLH-DSA are signature-only — `keyEncipherment` is rejected.
-/// - ML-KEM is key-encapsulation-only — if a KeyUsage is present it must be
-///   exactly `keyEncipherment` (per draft-ietf-lamps-kyber-certificates).
-///
-/// Returns `Ok(())` for non-PQC keys and for conformant combinations.
-#[cfg(feature = "pqc")]
-fn validate_pqc_key_usage<T>(
-    pkey: &PKey<T>,
-    key_usage: &HashSet<Usage>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if is_pqc_pkey(pkey) && key_usage.contains(&Usage::encipherment) {
-        return Err("keyEncipherment (Usage::encipherment) is not valid for a \
-            post-quantum signature key (ML-DSA / SLH-DSA): these algorithms are \
-            signature-only and cannot perform key encipherment. Use Usage::signature \
-            (and certsign/crlsign for a CA) instead."
-            .into());
-    }
-
-    if is_mlkem_pkey(pkey)
-        && !key_usage.is_empty()
-        && *key_usage != HashSet::from([Usage::encipherment])
-    {
-        return Err("an ML-KEM (FIPS 203) key may only assert keyEncipherment \
-            (Usage::encipherment) in its KeyUsage — no other bit is permitted \
-            (no digitalSignature, keyAgreement, dataEncipherment, certsign, or \
-            crlsign). Set key_usage to exactly {Usage::encipherment}, or omit it."
-            .into());
-    }
-
-    Ok(())
-}
 
 macro_rules! vec_str_to_hs {
     ($vec:expr) => {
