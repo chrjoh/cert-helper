@@ -1,5 +1,6 @@
 mod key;
 mod policy;
+mod usage;
 use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
 pub use key::KeyType;
 pub(crate) use key::is_digestless_key;
@@ -14,7 +15,7 @@ use openssl::nid::Nid;
 use openssl::pkey::{PKey, Private};
 use openssl::stack::Stack;
 use openssl::x509::extension::{
-    AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
+    AuthorityKeyIdentifier, BasicConstraints, KeyUsage, SubjectAlternativeName,
 };
 use openssl::x509::{
     X509, X509Builder, X509Extension, X509NameBuilder, X509Req, X509ReqBuilder, X509StoreContext,
@@ -27,6 +28,8 @@ use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::marker::PhantomData;
 use std::path::Path;
+pub use usage::Usage; // keeps cert_helper::certificate::Usage
+use usage::get_key_usage;
 use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
@@ -89,25 +92,6 @@ pub enum HashAlg {
     SHA384,
     /// SHA-512 (SHA-2 family), provides the highest bit-length hash in the SHA-2 family.
     SHA512,
-}
-/// Represents the allowed usages for a certificate, used in KeyUsage and ExtendedKeyUsage extensions.
-#[allow(non_camel_case_types)]
-#[derive(Hash, Eq, PartialEq, Debug, Clone)]
-pub enum Usage {
-    /// Allows the certificate to sign other certificates (typically used for CA certificates).
-    certsign,
-    /// Allows the certificate to sign certificate revocation lists (CRLs).
-    crlsign,
-    /// Allows the certificate to be used for encrypting data (e.g., key encipherment).
-    encipherment,
-    /// Indicates the certificate can be used for client authentication in TLS.
-    clientauth,
-    /// Indicates the certificate can be used for server authentication in TLS.
-    serverauth,
-    /// Allows the certificate to be used for digital signatures.
-    signature,
-    /// Indicates the certificate can be used for content commitment (non-repudiation).
-    contentcommitment,
 }
 
 /// Common functionality for extracting PEM-encoded data and private keys from X509-related types
@@ -1120,10 +1104,10 @@ impl CsrBuilder {
 
         let (tracked_key_usage, tracked_extended_key_usage) = get_key_usage(&Some(key_usage));
         if tracked_key_usage.is_used() {
-            extensions.push(tracked_key_usage.inner.build()?)?;
+            extensions.push(tracked_key_usage.into_inner().build()?)?;
         }
         if tracked_extended_key_usage.is_used() {
-            extensions.push(tracked_extended_key_usage.inner.build()?)?;
+            extensions.push(tracked_extended_key_usage.into_inner().build()?)?;
         }
 
         let mut san = SubjectAlternativeName::new();
@@ -1146,84 +1130,6 @@ impl CsrBuilder {
             csr,
             pkey: Some(pkey),
         })
-    }
-}
-struct TrackedExtendedKeyUsage {
-    inner: ExtendedKeyUsage,
-    used: bool,
-}
-
-impl TrackedExtendedKeyUsage {
-    fn new() -> Self {
-        Self {
-            inner: ExtendedKeyUsage::new(),
-            used: false,
-        }
-    }
-
-    fn client_auth(&mut self) {
-        self.inner.client_auth();
-        self.used = true;
-    }
-
-    fn server_auth(&mut self) {
-        self.inner.server_auth();
-        self.used = true;
-    }
-
-    fn is_used(&self) -> bool {
-        self.used
-    }
-
-    fn into_inner(self) -> ExtendedKeyUsage {
-        self.inner
-    }
-}
-
-struct TrackedKeyUsage {
-    inner: KeyUsage,
-    used: bool,
-}
-
-impl TrackedKeyUsage {
-    fn new() -> Self {
-        Self {
-            inner: KeyUsage::new(),
-            used: false,
-        }
-    }
-
-    fn digital_signature(&mut self) {
-        self.inner.digital_signature();
-        self.used = true;
-    }
-
-    fn non_repudiation(&mut self) {
-        self.inner.non_repudiation();
-        self.used = true;
-    }
-
-    fn key_encipherment(&mut self) {
-        self.inner.key_encipherment();
-        self.used = true;
-    }
-
-    fn key_cert_sign(&mut self) {
-        self.inner.key_cert_sign();
-        self.used = true;
-    }
-
-    fn crl_sign(&mut self) {
-        self.inner.crl_sign();
-        self.used = true;
-    }
-
-    fn is_used(&self) -> bool {
-        self.used
-    }
-
-    fn into_inner(self) -> KeyUsage {
-        self.inner
     }
 }
 fn ca_basic_constraints(path_len: Option<u32>) -> Result<X509Extension, ErrorStack> {
@@ -1337,40 +1243,6 @@ fn select_hash(hash_type: &Option<HashAlg>) -> MessageDigest {
         Some(HashAlg::SHA512) => MessageDigest::sha512(),
         _ => MessageDigest::sha256(),
     }
-}
-
-fn get_key_usage(usage: &Option<HashSet<Usage>>) -> (TrackedKeyUsage, TrackedExtendedKeyUsage) {
-    let mut ku = TrackedKeyUsage::new();
-    let mut eku = TrackedExtendedKeyUsage::new();
-    if let Some(usages) = usage {
-        for u in usages {
-            match u {
-                Usage::contentcommitment => {
-                    ku.non_repudiation();
-                }
-                Usage::encipherment => {
-                    ku.key_encipherment();
-                }
-                Usage::certsign => {
-                    ku.key_cert_sign();
-                }
-                Usage::clientauth => {
-                    eku.client_auth();
-                }
-                Usage::signature => {
-                    ku.digital_signature();
-                }
-                Usage::crlsign => {
-                    ku.crl_sign();
-                }
-                Usage::serverauth => {
-                    eku.server_auth();
-                }
-            }
-        }
-    }
-
-    (ku, eku)
 }
 
 fn verify_cert_path(
