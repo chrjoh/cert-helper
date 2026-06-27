@@ -6,7 +6,6 @@ mod policy;
 mod usage;
 use builder::select_hash;
 pub use builder::{BuilderCommon, BuilderFields, HashAlg, UseesBuilderFields};
-//use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
 use common::create_asn1_time_from_date;
 pub use common::{X509Common, X509Parts};
 pub use csr::{Csr, CsrBuilder, CsrOptions, CsrX509Common};
