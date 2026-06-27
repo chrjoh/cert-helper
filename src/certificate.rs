@@ -38,7 +38,21 @@ use usage::validate_pqc_key_usage;
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
 
+/// Typestate marker for a [`CertBuilder`] with **no** path length set.
+///
+/// This is the default state ([`CertBuilder::new`] returns
+/// `CertBuilder<PathLenUnset>`). In this state the builder can self-sign or sign
+/// without a chain. Calling [`CertBuilder::pathlen`] transitions it to
+/// [`PathLenSet`].
 pub struct PathLenUnset;
+
+/// Typestate marker for a [`CertBuilder`] with a path length set via
+/// [`CertBuilder::pathlen`].
+///
+/// In this state the builder must be signed with
+/// [`CertBuilder::build_and_sign_with_chain`], so the requested path length can be
+/// validated against the signer's chain. The plain `build_and_sign` is not
+/// available, preventing a CA from being issued without that check.
 pub struct PathLenSet;
 
 /// Holds the generated X.509 certificate and its associated private key.

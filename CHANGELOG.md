@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-## [0.4.8] -
+## [0.4.8] - 2026-06-27
 
 ### Added
 - Path length constraint support: `CertBuilder::pathlen` and `CsrOptions::pathlen`
