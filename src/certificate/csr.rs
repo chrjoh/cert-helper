@@ -1,3 +1,4 @@
+use super::common::{X509Common, X509Parts};
 #[cfg(feature = "pqc")]
 use super::key::reject_mlkem_signing;
 use super::key::{
@@ -8,8 +9,8 @@ use super::usage::get_key_usage;
 #[cfg(feature = "pqc")]
 use super::usage::validate_pqc_key_usage;
 use super::{
-    BuilderFields, Certificate, CertificatePolicy, Usage, UseesBuilderFields, X509Common,
-    X509Parts, ca_basic_constraints, can_sign_cert, create_asn1_time_from_date, select_hash,
+    BuilderFields, Certificate, CertificatePolicy, Usage, UseesBuilderFields, ca_basic_constraints,
+    can_sign_cert, create_asn1_time_from_date, select_hash,
 };
 use openssl::asn1::{Asn1Object, Asn1OctetString, Asn1Time};
 use openssl::bn::BigNum;
