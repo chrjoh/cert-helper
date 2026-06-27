@@ -1,3 +1,5 @@
+use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
+use openssl::asn1::Asn1Time;
 use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::Path;
@@ -86,4 +88,15 @@ impl<T: X509Parts> X509Common for T {
         write_file(self.pem_extension(), &self.get_pem()?)?;
         Ok(())
     }
+}
+
+pub(crate) fn create_asn1_time_from_date(
+    date_str: &str,
+) -> Result<Asn1Time, Box<dyn std::error::Error>> {
+    let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")?;
+    let datetime = NaiveDateTime::new(date, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+    let utc_datetime = Utc.from_utc_datetime(&datetime);
+    let asn1_time_str = utc_datetime.format("%Y%m%d%H%M%SZ").to_string();
+    let asn1_time = Asn1Time::from_str(&asn1_time_str)?;
+    Ok(asn1_time)
 }
