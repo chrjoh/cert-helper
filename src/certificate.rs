@@ -377,7 +377,7 @@ impl CertBuilder<PathLenSet> {
     pub fn build_and_sign_with_chain(
         &self,
         signer: &Certificate,
-        chain: &[&X509],
+        chain: &[&Certificate],
     ) -> Result<Certificate, Box<dyn std::error::Error>> {
         let can_sign = can_sign_cert(signer)?;
         if !can_sign {
@@ -389,14 +389,8 @@ impl CertBuilder<PathLenSet> {
             );
             return Err(err.into());
         }
-        if self.ca {
-            let budget = verify_cert_path(signer, chain)?; // Option<u32>
-            if let (Some(b), Some(m)) = (budget, self.path_len)
-                && m >= b
-            {
-                return Err("requested pathLen exceeds what the signer's chain permits".into());
-            }
-        }
+        let chain_x509: Vec<&X509> = chain.iter().map(|c| &c.x509).collect();
+        enforce_path_len(self.ca, self.path_len, signer, &chain_x509)?;
 
         let (mut builder, pkey) = self.prepare_x509_builder(Some(signer))?;
         let signer_key = signer
@@ -511,6 +505,26 @@ pub fn create_cert_chain_from_cert_list(
     // Reverse to have root (or highest known CA) first
     longest_chain.reverse();
     Ok(longest_chain)
+}
+
+fn enforce_path_len(
+    is_ca: bool,
+    path_len: Option<u32>,
+    signer: &Certificate,
+    chain: &[&X509],
+) -> Result<(), Box<dyn std::error::Error>> {
+    // No pathLen set (or non-CA) → nothing to enforce, no chain required.
+    // Matches CertBuilder: a no-pathLen / unlimited CA isn't budget-checked.
+    if !is_ca || path_len.is_none() {
+        return Ok(());
+    }
+    let budget = verify_cert_path(signer, chain)?;
+    if let (Some(b), Some(m)) = (budget, path_len)
+        && m >= b
+    {
+        return Err("requested pathLen exceeds what the signer's chain permits".into());
+    }
+    Ok(())
 }
 
 fn verify_cert_path(
@@ -677,7 +691,7 @@ mod tests {
             .pathlen(1)
             .build_and_self_sign()
             .unwrap();
-        let chain: Vec<&X509> = Vec::new();
+        let chain: Vec<&Certificate> = Vec::new();
         let inter_ca = CertBuilder::new()
             .common_name("My Test inter Ca")
             .is_ca(true)
@@ -701,7 +715,7 @@ mod tests {
             .pathlen(2)
             .build_and_self_sign()
             .unwrap();
-        let chain: Vec<&X509> = Vec::new();
+        let chain: Vec<&Certificate> = Vec::new();
         let inter_ca = CertBuilder::new()
             .common_name("My Test inter Ca")
             .is_ca(true)
@@ -712,7 +726,7 @@ mod tests {
             .common_name("leaf ca")
             .is_ca(true)
             .pathlen(0)
-            .build_and_sign_with_chain(&inter_ca, &[&ca.x509])
+            .build_and_sign_with_chain(&inter_ca, &[&ca])
             .unwrap();
 
         assert_eq!(leaf.x509.pathlen(), Some(0));
@@ -726,7 +740,7 @@ mod tests {
             .pathlen(2)
             .build_and_self_sign()
             .unwrap();
-        let chain: Vec<&X509> = Vec::new();
+        let chain: Vec<&Certificate> = Vec::new();
         let inter_ca = CertBuilder::new()
             .common_name("My Test inter Ca")
             .is_ca(true)
@@ -737,7 +751,7 @@ mod tests {
             .common_name("leaf ca")
             .is_ca(true)
             .pathlen(0)
-            .build_and_sign_with_chain(&inter_ca, &[&ca.x509])
+            .build_and_sign_with_chain(&inter_ca, &[&ca])
             .err()
             .expect("");
 
@@ -757,7 +771,7 @@ mod tests {
             .build_and_self_sign()
             .unwrap();
 
-        let chain: Vec<&X509> = Vec::new();
+        let chain: Vec<&Certificate> = Vec::new();
 
         // A user mistake: an intermediate claiming pathlen(1) under a root that only
         // permits one CA below it. Must be rejected at issuance.

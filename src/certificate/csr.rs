@@ -1,5 +1,6 @@
 use super::builder::{BuilderFields, UseesBuilderFields, select_hash};
 use super::common::{X509Common, X509Parts, create_asn1_time_from_date};
+use super::enforce_path_len;
 #[cfg(feature = "pqc")]
 use super::key::reject_mlkem_signing;
 use super::key::{
@@ -62,6 +63,7 @@ pub struct CsrOptions {
     ca: bool,
     policies: Vec<CertificatePolicy>,
     path_len: Option<u32>,
+    chain: Vec<Certificate>,
 }
 impl Default for CsrOptions {
     fn default() -> Self {
@@ -81,6 +83,7 @@ impl CsrOptions {
             valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
             policies: Default::default(),
             path_len: None,
+            chain: Vec::new(),
         }
     }
 
@@ -125,8 +128,9 @@ impl CsrOptions {
     ///
     /// # Arguments
     /// * `path_len`- u32
-    pub fn pathlen(mut self, path_len: u32) -> Self {
+    pub fn pathlen(mut self, path_len: u32, chain: Vec<Certificate>) -> Self {
         self.path_len = Some(path_len);
+        self.chain = chain;
         self
     }
 }
@@ -161,6 +165,8 @@ impl Csr {
             );
             return Err(err.into());
         }
+        let chain_refs: Vec<&X509> = options.chain.iter().map(|c| &c.x509).collect();
+        enforce_path_len(options.ca, options.path_len, signer, &chain_refs)?;
         let signer_key = signer
             .pkey
             .as_ref()
@@ -484,7 +490,7 @@ mod tests {
             .certificate_signing_request()
             .unwrap();
         let cert = csr
-            .build_signed_certificate(&ca, CsrOptions::new().pathlen(1).is_ca(true))
+            .build_signed_certificate(&ca, CsrOptions::new().pathlen(1, vec![]).is_ca(true))
             .unwrap();
         assert_eq!(cert.x509.pathlen(), Some(1));
     }
@@ -503,11 +509,157 @@ mod tests {
             .certificate_signing_request()
             .unwrap();
         let cert = csr
-            .build_signed_certificate(&ca, CsrOptions::new().pathlen(1))
+            .build_signed_certificate(&ca, CsrOptions::new().pathlen(1, vec![]))
             .unwrap();
         assert_eq!(cert.x509.pathlen(), None);
     }
 
+    #[test]
+    fn create_ca_cert_with_chain_from_csr_with_path_len() {
+        let ca = CertBuilder::new()
+            .common_name("My Test root Ca")
+            .is_ca(true)
+            .pathlen(3)
+            .build_and_self_sign()
+            .unwrap();
+        let interca1 = CertBuilder::new()
+            .common_name("My Test Ca1")
+            .is_ca(true)
+            .pathlen(2)
+            .build_and_sign_with_chain(&ca, &[])
+            .unwrap();
+        let interca2 = CertBuilder::new()
+            .common_name("My Test Ca2")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_sign_with_chain(&interca1, &[&ca])
+            .unwrap();
+        let csr = CsrBuilder::new()
+            .common_name("leaf")
+            .certificate_signing_request()
+            .unwrap();
+        let cert = csr
+            .build_signed_certificate(
+                &interca2,
+                CsrOptions::new().pathlen(0, vec![ca, interca1]).is_ca(true),
+            )
+            .unwrap();
+        assert_eq!(cert.x509.pathlen(), Some(0));
+    }
+
+    #[test]
+    fn create_ca_cert_with_chain_from_csr_with_budget_exhausted() {
+        let ca = CertBuilder::new()
+            .common_name("My Test root Ca")
+            .is_ca(true)
+            .pathlen(3)
+            .build_and_self_sign()
+            .unwrap();
+        let interca1 = CertBuilder::new()
+            .common_name("My Test Ca1")
+            .is_ca(true)
+            .pathlen(2)
+            .build_and_sign_with_chain(&ca, &[])
+            .unwrap();
+        let interca2 = CertBuilder::new()
+            .common_name("My Test Ca2")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_sign_with_chain(&interca1, &[&ca])
+            .unwrap();
+        let csr = CsrBuilder::new()
+            .common_name("leaf")
+            .certificate_signing_request()
+            .unwrap();
+        let err = csr
+            .build_signed_certificate(
+                &interca2,
+                CsrOptions::new().pathlen(0, vec![ca, interca1]).is_ca(true),
+            )
+            .err()
+            .expect("");
+        assert!(
+            err.to_string()
+                .contains("signer's path length budget is exhausted; cannot issue a CA"),
+            "signer's path length budget is exhausted; cannot issue a CA got: {err}"
+        );
+    }
+    #[test]
+    fn csr_inflated_pathlen_is_rejected() {
+        let ca = CertBuilder::new()
+            .common_name("root")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_self_sign()
+            .unwrap();
+        let csr = CsrBuilder::new()
+            .common_name("leaf")
+            .certificate_signing_request()
+            .unwrap();
+        let err = csr
+            .build_signed_certificate(
+                &ca,
+                CsrOptions::new().is_ca(true).pathlen(1, vec![]), // budget=1, m=1 → 1>=1
+            )
+            .err()
+            .expect("inflated pathLen must be rejected");
+        assert!(
+            err.to_string()
+                .contains("requested pathLen exceeds what the signer's chain permits"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn csr_incomplete_chain_is_rejected() {
+        let ca = CertBuilder::new()
+            .common_name("root")
+            .is_ca(true)
+            .pathlen(2)
+            .build_and_self_sign()
+            .unwrap();
+        let inter = CertBuilder::new()
+            .common_name("inter")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_sign_with_chain(&ca, &[])
+            .unwrap();
+        let csr = CsrBuilder::new()
+            .common_name("leaf")
+            .certificate_signing_request()
+            .unwrap();
+        let err = csr
+            .build_signed_certificate(
+                &inter,
+                CsrOptions::new().is_ca(true).pathlen(0, vec![]), // root omitted
+            )
+            .err()
+            .expect("incomplete chain must be rejected");
+        assert!(
+            err.to_string().contains("Could not find self signed root"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn csr_unlimited_signer_allows_ca_issuance() {
+        let ca = CertBuilder::new()
+            .common_name("root")
+            .is_ca(true) // no .pathlen() → None
+            .build_and_self_sign()
+            .unwrap();
+        let csr = CsrBuilder::new()
+            .common_name("leaf")
+            .certificate_signing_request()
+            .unwrap();
+        let cert = csr
+            .build_signed_certificate(
+                &ca,
+                CsrOptions::new().is_ca(true).pathlen(5, vec![]), // unlimited → any m ok
+            )
+            .unwrap();
+        assert_eq!(cert.x509.pathlen(), Some(5));
+    }
     #[test]
     fn build_signed_certificate_rejects_csr_with_bad_proof_of_possession() {
         // A CSR whose self-signature does not match its public key (proof-of-

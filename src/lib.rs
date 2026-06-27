@@ -162,6 +162,62 @@
 //!
 //! ```
 //!
+//! ## Limiting CA chain depth with path length constraints
+//!
+//! `pathlen(n)` sets the BasicConstraints path-length constraint: at most `n`
+//! intermediate CAs may sit below this certificate. When issuing under a chain it
+//! is validated against the signer's remaining budget, so you can't mint a CA that
+//! exceeds what its issuer permits.
+//!
+//! ```rust
+//! use cert_helper::certificate::{CertBuilder, UseesBuilderFields};
+//!
+//! // Root CA that allows at most one CA beneath it.
+//! let root = CertBuilder::new()
+//!     .common_name("My Root CA")
+//!     .is_ca(true)
+//!     .pathlen(1)
+//!     .build_and_self_sign()
+//!     .expect("self-sign root");
+//!
+//! // Intermediate CA (pathlen 0 → may only issue end-entity certs), signed by the
+//! // root. The chain is empty because the root is a self-signed trust anchor.
+//! let intermediate = CertBuilder::new()
+//!     .common_name("My Intermediate CA")
+//!     .is_ca(true)
+//!     .pathlen(0)
+//!     .build_and_sign_with_chain(&root, &[])
+//!     .expect("issue intermediate under root");
+//!
+//! assert_eq!(intermediate.x509.pathlen(), Some(0));
+//! ```
+//!
+//! The same constraint applies when issuing from a CSR via
+//! [`CsrOptions`](certificate::CsrOptions). The chain to validate against is passed
+//! alongside the path length (empty here, since the signer is a self-signed root):
+//!
+//! ```rust
+//! use cert_helper::certificate::{CertBuilder, CsrBuilder, CsrOptions, UseesBuilderFields};
+//!
+//! let ca = CertBuilder::new()
+//!     .common_name("My Root CA")
+//!     .is_ca(true)
+//!     .pathlen(2)
+//!     .build_and_self_sign()
+//!     .expect("self-sign root");
+//!
+//! let csr = CsrBuilder::new()
+//!     .common_name("My Intermediate CA")
+//!     .certificate_signing_request()
+//!     .expect("build CSR");
+//!
+//! let cert = csr
+//!     .build_signed_certificate(&ca, CsrOptions::new().is_ca(true).pathlen(1, vec![]))
+//!     .expect("issue intermediate from CSR");
+//!
+//! assert_eq!(cert.x509.pathlen(), Some(1));
+//! ```
+//!
 //! ## Post-Quantum keys (experimental)
 //!
 //! Build with `--features pqc` to enable NIST-standardized post-quantum
@@ -260,6 +316,7 @@
 //! | valid_to | End date then the certificate is not valid, default is 1 year | string: 2020-01-01 |
 //! | usage | Key usage to add to the certificates, see list below for options | list of enums, defined in Key Usage table |
 //! | certificate_policy | optional certificate policies to add | AnyPolicy, DomainValidation, OrganizationValidated, IndividualValidated, ExtendedValidation|
+//! | pathlen | optional CA path length: max intermediate CAs allowed below this cert (only applies when ca is true) | u32: 0, 1, 2 … |
 //!
 //! ### Key usage
 //!
