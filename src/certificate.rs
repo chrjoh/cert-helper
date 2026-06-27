@@ -1,806 +1,60 @@
-use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
-use foreign_types::ForeignType;
+mod builder;
+mod common;
+mod csr;
+mod key;
+mod policy;
+mod usage;
+use builder::select_hash;
+pub use builder::{BuilderCommon, BuilderFields, HashAlg, UseesBuilderFields};
+use common::create_asn1_time_from_date;
+pub use common::{X509Common, X509Parts};
+pub use csr::{Csr, CsrBuilder, CsrOptions, CsrX509Common};
+pub use key::KeyType;
+pub(crate) use key::is_digestless_key;
+#[cfg(feature = "pqc")]
+use key::reject_mlkem_signing;
+use key::{select_key, sign_certificate_digestless};
 use openssl::asn1::{Asn1Object, Asn1OctetString, Asn1Time};
 use openssl::bn::BigNum;
-use openssl::ec::{EcGroup, EcKey};
 use openssl::error::ErrorStack;
 use openssl::hash::{MessageDigest, hash};
 use openssl::nid::Nid;
-use openssl::pkey::{Id, PKey, Private};
-use openssl::rsa::Rsa;
+use openssl::pkey::{PKey, Private};
 use openssl::stack::Stack;
-use openssl::x509::extension::{
-    AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
-};
+use openssl::x509::extension::{AuthorityKeyIdentifier, BasicConstraints, SubjectAlternativeName};
 use openssl::x509::{
-    X509, X509Builder, X509Extension, X509NameBuilder, X509Req, X509ReqBuilder, X509StoreContext,
-    store::X509StoreBuilder,
+    X509, X509Builder, X509Extension, X509NameBuilder, X509StoreContext, store::X509StoreBuilder,
 };
+pub use policy::CertificatePolicy;
+use policy::append_certificate_policies;
 use std::collections::{HashMap, HashSet};
-use std::fs::{File, create_dir_all};
-use std::io::Write;
+
+use std::marker::PhantomData;
 use std::path::Path;
-use x509_parser::certification_request::X509CertificationRequest;
+pub use usage::Usage;
+use usage::get_key_usage;
+#[cfg(feature = "pqc")]
+use usage::validate_pqc_key_usage;
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
-use x509_parser::prelude::FromDer;
-use yasna::models::ObjectIdentifier;
 
-unsafe extern "C" {
-    pub fn X509_sign(
-        x: *mut openssl_sys::X509,
-        pkey: *mut openssl_sys::EVP_PKEY,
-        md: *const openssl_sys::EVP_MD,
-    ) -> ::std::os::raw::c_int;
-    pub fn X509_sign_ctx(
-        x: *mut openssl_sys::X509,
-        ctx: *mut openssl_sys::EVP_MD_CTX,
-    ) -> ::std::os::raw::c_int;
-}
-
-unsafe extern "C" {
-    pub fn X509_REQ_sign(
-        req: *mut openssl_sys::X509_REQ,
-        pkey: *mut openssl_sys::EVP_PKEY,
-        md: *const openssl_sys::EVP_MD,
-    ) -> ::std::os::raw::c_int;
-    pub fn X509_REQ_sign_ctx(
-        req: *mut openssl_sys::X509_REQ,
-        ctx: *mut openssl_sys::EVP_MD_CTX,
-    ) -> ::std::os::raw::c_int;
-}
-
-/// A certificate policy OID found in the `certificatePolicies` extension.
+/// Typestate marker for a [`CertBuilder`] with **no** path length set.
 ///
-/// The named variants are the CA/Browser Forum reserved policy identifiers
-/// (arc `2.23.140.1`) that signal the validation level a publicly-trusted CA
-/// performed before issuance, plus the special `anyPolicy` OID from RFC 5280.
-/// Anything outside that set is preserved verbatim in [`CertificatePolicy::Other`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CertificatePolicy {
-    DomainValidated,       // 2.23.140.1.2.1
-    OrganizationValidated, // 2.23.140.1.2.2
-    IndividualValidated,   // 2.23.140.1.2.3
-    ExtendedValidation,    // 2.23.140.1.1
-    AnyPolicy,             // 2.5.29.32.0
-    Other(String),         // private / arbitrary / test OID
-}
+/// This is the default state ([`CertBuilder::new`] returns
+/// `CertBuilder<PathLenUnset>`). In this state the builder can self-sign or sign
+/// without a chain. Calling [`CertBuilder::pathlen`] transitions it to
+/// [`PathLenSet`].
+pub struct PathLenUnset;
 
-impl CertificatePolicy {
-    /// Returns the policy's OID in dotted-decimal notation.
-    ///
-    /// For named variants this is a fixed `&'static str`; for
-    /// [`CertificatePolicy::Other`] it borrows the stored OID string.
-    pub fn oid(&self) -> &str {
-        match self {
-            Self::DomainValidated => "2.23.140.1.2.1",
-            Self::OrganizationValidated => "2.23.140.1.2.2",
-            Self::IndividualValidated => "2.23.140.1.2.3",
-            Self::ExtendedValidation => "2.23.140.1.1",
-            Self::AnyPolicy => "2.5.29.32.0",
-            Self::Other(oid) => oid,
-        }
-    }
-}
-/// Sign a just-built `X509` in-place with a digest-less key (Ed25519 or PQC).
+/// Typestate marker for a [`CertBuilder`] with a path length set via
+/// [`CertBuilder::pathlen`].
 ///
-/// We avoid `X509_sign(x, pkey, NULL)` because OpenSSL 3.5+ infers a default
-/// digest for ML-DSA/SLH-DSA in that path, which their providers then reject.
-/// Instead we initialise an `EVP_MD_CTX` with an explicit NULL `mdname` and
-/// hand it to `X509_sign_ctx`.
-/// RAII guard that frees an `EVP_MD_CTX` on drop, including on early return and
-/// unwind. Keeps the digest-less signing paths leak-free without manual
-/// `EVP_MD_CTX_free` on every branch. Mirrors `pqc::PkeyCtx`.
-struct MdCtx(*mut openssl_sys::EVP_MD_CTX);
+/// In this state the builder must be signed with
+/// [`CertBuilder::build_and_sign_with_chain`], so the requested path length can be
+/// validated against the signer's chain. The plain `build_and_sign` is not
+/// available, preventing a CA from being issued without that check.
+pub struct PathLenSet;
 
-impl Drop for MdCtx {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: freed exactly once (on every path including unwind);
-            // EVP_MD_CTX_free is a no-op on NULL.
-            unsafe { openssl_sys::EVP_MD_CTX_free(self.0) }
-        }
-    }
-}
-
-/// Sign a just-built `X509` in-place with a digest-less key (Ed25519 or PQC).
-///
-/// Ed25519 uses the plain `X509_sign(x, pkey, NULL)` path that has always
-/// worked. PQC keys (ML-DSA / SLH-DSA) need a workaround on OpenSSL 3.5+:
-/// `X509_sign(_, _, NULL)` triggers default-digest inference in
-/// `do_sigver_init`, and the PQC providers then reject the inferred digest
-/// with "Explicit digest not supported". We instead initialise an `EVP_MD_CTX`
-/// with an *empty* C string as `mdname` — that bypasses the default-digest
-/// lookup inside OpenSSL while still satisfying the provider's
-/// `mdname[0] != '\0'` guard — and hand the ctx to `X509_sign_ctx`.
-fn sign_certificate_digestless(
-    cert: &X509,
-    pkey: &PKey<openssl::pkey::Private>,
-) -> Result<(), String> {
-    if !is_digestless_key(pkey) {
-        return Err("sign_certificate_digestless called with non-digestless key".to_string());
-    }
-    let cert_ptr = cert.as_ptr();
-    let pkey_ptr = pkey.as_ptr();
-
-    if pkey.id() == Id::ED25519 {
-        let result = unsafe { X509_sign(cert_ptr, pkey_ptr, std::ptr::null()) };
-        return if result > 0 {
-            Ok(())
-        } else {
-            Err("Failed to sign certificate with Ed25519".to_string())
-        };
-    }
-
-    // PQC path: EVP_DigestSignInit (non-ex) with NULL mdname + X509_sign_ctx.
-    // `Signer::new_without_digest` in the openssl crate uses this exact call and
-    // it works for ML-DSA/SLH-DSA whereas `EVP_DigestSignInit_ex` does not.
-    // SAFETY: `ctx` is owned by `MdCtx` and freed on every path (early return or
-    // scope exit). The internal EVP_PKEY_CTX created by EVP_DigestSignInit (NULL
-    // pctx arg) is owned by `ctx` and released with it. `pkey_ptr`/`cert_ptr` are
-    // borrows from live wrappers and are not freed here.
-    let ctx = MdCtx(unsafe { openssl_sys::EVP_MD_CTX_new() });
-    if ctx.0.is_null() {
-        return Err("EVP_MD_CTX_new returned NULL".to_string());
-    }
-    let init = unsafe {
-        openssl_sys::EVP_DigestSignInit(
-            ctx.0,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            pkey_ptr,
-        )
-    };
-    if init <= 0 {
-        return Err("EVP_DigestSignInit failed for PQC key".to_string());
-    }
-    let result = unsafe { X509_sign_ctx(cert_ptr, ctx.0) };
-
-    if result > 0 {
-        Ok(())
-    } else {
-        Err("X509_sign_ctx failed for PQC key".to_string())
-    }
-}
-
-/// Same as `sign_certificate_digestless` but for `X509Req`. See the
-/// `sign_certificate_digestless` docstring for why Ed25519 and PQC take
-/// different OpenSSL paths.
-fn sign_x509_req_digestless(req: &X509Req, pkey: &PKey<Private>) -> Result<(), String> {
-    if !is_digestless_key(pkey) {
-        return Err("sign_x509_req_digestless called with non-digestless key".to_string());
-    }
-    let req_ptr = req.as_ptr();
-    let pkey_ptr = pkey.as_ptr();
-
-    if pkey.id() == Id::ED25519 {
-        let result = unsafe { X509_REQ_sign(req_ptr, pkey_ptr, std::ptr::null()) };
-        return if result > 0 {
-            Ok(())
-        } else {
-            Err("Failed to sign X509Req with Ed25519".to_string())
-        };
-    }
-
-    // SAFETY: same invariants as in `sign_certificate_digestless` — `ctx` is
-    // owned by `MdCtx` and freed on every path; `pkey_ptr`/`req_ptr` are borrows.
-    let ctx = MdCtx(unsafe { openssl_sys::EVP_MD_CTX_new() });
-    if ctx.0.is_null() {
-        return Err("EVP_MD_CTX_new returned NULL".to_string());
-    }
-    let init = unsafe {
-        openssl_sys::EVP_DigestSignInit(
-            ctx.0,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            pkey_ptr,
-        )
-    };
-    if init <= 0 {
-        return Err("EVP_DigestSignInit failed for PQC key".to_string());
-    }
-    let result = unsafe { X509_REQ_sign_ctx(req_ptr, ctx.0) };
-
-    if result > 0 {
-        Ok(())
-    } else {
-        Err("X509_REQ_sign_ctx failed for PQC key".to_string())
-    }
-}
-
-/// Returns true for keys whose OpenSSL EVP signing path does not take an
-/// external digest. Today: Ed25519 and (when the `pqc` feature is enabled)
-/// the six FIPS 204 / 205 post-quantum variants.
-pub(crate) fn is_digestless_key(pkey: &PKey<Private>) -> bool {
-    if pkey.id() == Id::ED25519 {
-        return true;
-    }
-    #[cfg(feature = "pqc")]
-    {
-        return is_pqc_pkey(pkey);
-    }
-    #[allow(unreachable_code)]
-    false
-}
-
-#[cfg(feature = "pqc")]
-fn is_pqc_pkey(pkey: &PKey<Private>) -> bool {
-    use std::ffi::CString;
-    use std::sync::OnceLock;
-
-    // Cache the CStrings so we don't rebuild them per call.
-    static NAMES: OnceLock<[CString; 6]> = OnceLock::new();
-    let names = NAMES.get_or_init(|| {
-        [
-            CString::new("ML-DSA-44").unwrap(),
-            CString::new("ML-DSA-65").unwrap(),
-            CString::new("ML-DSA-87").unwrap(),
-            CString::new("SLH-DSA-SHA2-128s").unwrap(),
-            CString::new("SLH-DSA-SHA2-192s").unwrap(),
-            CString::new("SLH-DSA-SHA2-256s").unwrap(),
-        ]
-    });
-    use foreign_types::ForeignType;
-    let ptr = pkey.as_ptr();
-    names
-        .iter()
-        // SAFETY: EVP_PKEY_is_a accepts any NUL-terminated C string and a
-        // valid EVP_PKEY*; returns 0 for mismatch, 1 for match — never UB.
-        .any(|n| unsafe { pqc::EVP_PKEY_is_a(ptr, n.as_ptr()) } == 1)
-}
-
-/// FIPS 203 ML-KEM algorithm OIDs, arc `2.16.840.1.101.3.4.4.x`. These are the
-/// `id-alg-ml-kem-*` identifiers from draft-ietf-lamps-kyber-certificates that
-/// appear in an ML-KEM `SubjectPublicKeyInfo`. Detection in [`is_mlkem_pkey`] is
-/// by OpenSSL EVP algorithm name (provider-agnostic, like [`is_pqc_pkey`]); the
-/// OIDs are kept here for reference since `oid-registry` does not know them yet.
-#[cfg(feature = "pqc")]
-#[allow(dead_code)]
-const ML_KEM_OIDS: [&str; 3] = [
-    "2.16.840.1.101.3.4.4.1", // id-alg-ml-kem-512
-    "2.16.840.1.101.3.4.4.2", // id-alg-ml-kem-768
-    "2.16.840.1.101.3.4.4.3", // id-alg-ml-kem-1024
-];
-
-/// Returns true if `pkey` is an ML-KEM (FIPS 203) key-encapsulation key.
-///
-/// This is deliberately separate from [`is_pqc_pkey`]: ML-KEM keys are *not*
-/// signature keys. Per draft-ietf-lamps-kyber-certificates they may only assert
-/// the `keyEncipherment` KeyUsage bit, and they cannot produce signatures — so
-/// they can neither self-sign a certificate nor sign a CSR. Keeping them out of
-/// `is_pqc_pkey` also keeps them out of [`is_digestless_key`], which gates the
-/// signing path.
-#[cfg(feature = "pqc")]
-fn is_mlkem_pkey(pkey: &PKey<Private>) -> bool {
-    use std::ffi::CString;
-    use std::sync::OnceLock;
-
-    // Cache the CStrings so we don't rebuild them per call.
-    static NAMES: OnceLock<[CString; 3]> = OnceLock::new();
-    let names = NAMES.get_or_init(|| {
-        [
-            CString::new("ML-KEM-512").unwrap(),
-            CString::new("ML-KEM-768").unwrap(),
-            CString::new("ML-KEM-1024").unwrap(),
-        ]
-    });
-    use foreign_types::ForeignType;
-    let ptr = pkey.as_ptr();
-    names
-        .iter()
-        // SAFETY: EVP_PKEY_is_a accepts any NUL-terminated C string and a
-        // valid EVP_PKEY*; returns 0 for mismatch, 1 for match — never UB.
-        .any(|n| unsafe { pqc::EVP_PKEY_is_a(ptr, n.as_ptr()) } == 1)
-}
-
-#[cfg(feature = "pqc")]
-mod pqc {
-    use foreign_types::ForeignType;
-    use openssl::error::ErrorStack;
-    use openssl::pkey::{PKey, Private};
-    use std::ffi::CString;
-
-    unsafe extern "C" {
-        fn EVP_PKEY_CTX_new_from_name(
-            libctx: *mut std::ffi::c_void,
-            name: *const std::os::raw::c_char,
-            propquery: *const std::os::raw::c_char,
-        ) -> *mut openssl_sys::EVP_PKEY_CTX;
-        fn EVP_PKEY_keygen_init(ctx: *mut openssl_sys::EVP_PKEY_CTX) -> std::os::raw::c_int;
-        fn EVP_PKEY_generate(
-            ctx: *mut openssl_sys::EVP_PKEY_CTX,
-            ppkey: *mut *mut openssl_sys::EVP_PKEY,
-        ) -> std::os::raw::c_int;
-        fn EVP_PKEY_CTX_free(ctx: *mut openssl_sys::EVP_PKEY_CTX);
-        /// Returns 1 if `pkey` is of algorithm `name`, 0 otherwise.
-        /// Use this instead of `EVP_PKEY_id` for provider-only algorithms
-        /// (ML-DSA, SLH-DSA) whose legacy NID is -1.
-        pub fn EVP_PKEY_is_a(
-            pkey: *mut openssl_sys::EVP_PKEY,
-            name: *const std::os::raw::c_char,
-        ) -> std::os::raw::c_int;
-    }
-
-    /// RAII guard that frees an `EVP_PKEY_CTX` on drop, including unwinds.
-    struct PkeyCtx(*mut openssl_sys::EVP_PKEY_CTX);
-
-    impl Drop for PkeyCtx {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe { EVP_PKEY_CTX_free(self.0) }
-            }
-        }
-    }
-
-    /// Generate a post-quantum signing key by OpenSSL EVP algorithm name.
-    ///
-    /// Accepts the FIPS 204 / FIPS 205 canonical names:
-    /// `"ML-DSA-44"`, `"ML-DSA-65"`, `"ML-DSA-87"`,
-    /// `"SLH-DSA-SHA2-128s"`, `"SLH-DSA-SHA2-192s"`, `"SLH-DSA-SHA2-256s"`.
-    ///
-    /// Returns `Err(ErrorStack)` if the algorithm is unknown to the linked
-    /// OpenSSL, keygen init fails, or key generation fails. Never panics,
-    /// never leaks the `EVP_PKEY_CTX`.
-    pub(super) fn generate_pqc_key(alg_name: &str) -> Result<PKey<Private>, ErrorStack> {
-        let cname = CString::new(alg_name).expect("alg_name contains interior NUL");
-
-        // SAFETY: NULL libctx => default library context. NULL propquery matches
-        // every provider. The returned ctx is owned by PkeyCtx, freed on all paths.
-        let ctx_ptr = unsafe {
-            EVP_PKEY_CTX_new_from_name(std::ptr::null_mut(), cname.as_ptr(), std::ptr::null())
-        };
-        if ctx_ptr.is_null() {
-            return Err(ErrorStack::get());
-        }
-        let ctx = PkeyCtx(ctx_ptr);
-
-        if unsafe { EVP_PKEY_keygen_init(ctx.0) } <= 0 {
-            return Err(ErrorStack::get());
-        }
-
-        let mut pkey_ptr: *mut openssl_sys::EVP_PKEY = std::ptr::null_mut();
-        if unsafe { EVP_PKEY_generate(ctx.0, &mut pkey_ptr) } <= 0 {
-            return Err(ErrorStack::get());
-        }
-        if pkey_ptr.is_null() {
-            return Err(ErrorStack::get());
-        }
-
-        // SAFETY: EVP_PKEY_generate returned ownership of a freshly-allocated
-        // EVP_PKEY. PKey::from_ptr takes ownership and frees on drop.
-        Ok(unsafe { PKey::<Private>::from_ptr(pkey_ptr) })
-    }
-}
-
-#[cfg(feature = "pqc")]
-use pqc::generate_pqc_key;
-
-macro_rules! vec_str_to_hs {
-    ($vec:expr) => {
-        $vec.iter()
-            .map(|s| s.to_string())
-            .collect::<HashSet<String>>()
-    };
-}
-/// Defines what type of key that can be used with the certificate
-#[derive(Debug, Clone, PartialEq)]
-pub enum KeyType {
-    /// RSA key with a 2048-bit length.
-    RSA2048,
-    /// RSA key with a 4096-bit length.
-    RSA4096,
-    /// Elliptic Curve key using the NIST P-224 curve (secp224r1).
-    P224,
-    /// Elliptic Curve key using the NIST P-256 curve (secp256r1). Also known as prime256v1.
-    P256,
-    /// Elliptic Curve key using the NIST P-384 curve (secp384r1).
-    P384,
-    /// Elliptic Curve key using the NIST P-521 curve (secp521r1).
-    P521,
-    /// Edwards-curve Digital Signature Algorithm using Ed25519.
-    Ed25519,
-    /// ML-DSA-44 (FIPS 204, formerly Dilithium2). Post-quantum lattice signature.
-    #[cfg(feature = "pqc")]
-    MlDsa44,
-    /// ML-DSA-65 (FIPS 204, formerly Dilithium3). Post-quantum lattice signature.
-    #[cfg(feature = "pqc")]
-    MlDsa65,
-    /// ML-DSA-87 (FIPS 204, formerly Dilithium5). Post-quantum lattice signature.
-    #[cfg(feature = "pqc")]
-    MlDsa87,
-    /// SLH-DSA-SHA2-128s (FIPS 205, formerly SPHINCS+). Hash-based signature, small variant.
-    #[cfg(feature = "pqc")]
-    SlhDsaSha2_128s,
-    /// SLH-DSA-SHA2-192s (FIPS 205). Hash-based signature, medium variant.
-    #[cfg(feature = "pqc")]
-    SlhDsaSha2_192s,
-    /// SLH-DSA-SHA2-256s (FIPS 205). Hash-based signature, large variant.
-    #[cfg(feature = "pqc")]
-    SlhDsaSha2_256s,
-    /// ML-KEM-512 (FIPS 203, formerly Kyber). Post-quantum key-encapsulation
-    /// key. Encapsulation/encryption only — cannot sign. See [`KeyType`] notes
-    /// on ML-KEM: only `keyEncipherment` is a valid KeyUsage and certificates
-    /// must be issued by a separate signing CA, not self-signed.
-    #[cfg(feature = "pqc")]
-    MlKem512,
-    /// ML-KEM-768 (FIPS 203). Post-quantum key-encapsulation key. See
-    /// [`KeyType::MlKem512`].
-    #[cfg(feature = "pqc")]
-    MlKem768,
-    /// ML-KEM-1024 (FIPS 203). Post-quantum key-encapsulation key. See
-    /// [`KeyType::MlKem512`].
-    #[cfg(feature = "pqc")]
-    MlKem1024,
-}
-/// Defines which hash algorithm to be used in certificate signing
-#[derive(Debug, Clone)]
-pub enum HashAlg {
-    /// SHA-1 (Secure Hash Algorithm 1), now considered weak and generally discouraged for new certificates.
-    SHA1,
-    /// SHA-256 (part of SHA-2 family)
-    SHA256,
-    /// SHA-384 (SHA-2 family), offers stronger security and is often used with larger key sizes.
-    SHA384,
-    /// SHA-512 (SHA-2 family), provides the highest bit-length hash in the SHA-2 family.
-    SHA512,
-}
-/// Represents the allowed usages for a certificate, used in KeyUsage and ExtendedKeyUsage extensions.
-#[allow(non_camel_case_types)]
-#[derive(Hash, Eq, PartialEq, Debug, Clone)]
-pub enum Usage {
-    /// Allows the certificate to sign other certificates (typically used for CA certificates).
-    certsign,
-    /// Allows the certificate to sign certificate revocation lists (CRLs).
-    crlsign,
-    /// Allows the certificate to be used for encrypting data (e.g., key encipherment).
-    encipherment,
-    /// Indicates the certificate can be used for client authentication in TLS.
-    clientauth,
-    /// Indicates the certificate can be used for server authentication in TLS.
-    serverauth,
-    /// Allows the certificate to be used for digital signatures.
-    signature,
-    /// Indicates the certificate can be used for content commitment (non-repudiation).
-    contentcommitment,
-}
-
-/// Common functionality for extracting PEM-encoded data and private keys from X509-related types
-pub trait X509Parts {
-    /// Returns the PEM-encoded representation of the X.509 object (e.g., certificate or CSR).
-    ///
-    /// # Returns
-    /// A `Vec<u8>` containing the PEM data, or an error if encoding fails.
-    fn get_pem(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
-    /// Returns the PEM-encoded private key associated with the X.509 object.
-    ///
-    /// # Returns
-    /// A `Vec<u8>` containing the PEM-encoded private key, or an error if retrieval fails.
-    fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
-    /// Returns the file extension typically used for the PEM output (e.g., `_cert.pem.`, `_csr.pem`, `_peky.pem`).
-    ///
-    /// # Returns
-    /// A static string slice representing the file extension.
-    fn pem_extension(&self) -> &'static str;
-}
-
-/// Provides a method to save the private key and X509 certificate or CSR data to files.
-pub trait X509Common {
-    /// Saves the X.509 object (e.g., certificate, CSR, or private key) to a file.
-    ///
-    /// # Arguments
-    /// * `path` - The directory path where the file should be saved.
-    /// * `filename` - The name of the file (without extension).
-    ///
-    /// The file extension is typically determined by the object's type (e.g., `.crt`, `.csr`, `.key`)
-    /// and is provided by the [`X509Parts::pem_extension`] method if implemented.
-    ///
-    /// # Returns
-    /// * `Ok(())` if the file was successfully written.
-    /// * `Err` if an error occurred during file creation or writing.
-    fn save<P: AsRef<Path>, F: AsRef<Path>>(
-        &self,
-        path: P,
-        filename: F,
-    ) -> Result<(), Box<dyn std::error::Error>>;
-}
-
-/// Implements `X509Common` for all types that implement `X509Parts`.
-///
-/// # Example
-/// ```no_run
-/// use cert_helper::certificate::{Certificate, X509Common};
-/// let cert = Certificate::load_cert_and_key("cert.pem", "key.pem").expect("Failed to generate certificate");
-/// cert.save("output", "mycert");
-/// ```
-impl<T: X509Parts> X509Common for T {
-    /// Will save the cert/csr  and private key to pem file
-    /// if path = /path/foo/bar and filename = mytest
-    /// For example with certificate it will be:
-    /// /path/foo/bar/mytest_cert.pem
-    /// /path/foo/bar/mytest_pkey.pem
-    /// and for certificate signing request:
-    /// /path/foo/bar/mytest_csr.pem
-    /// /path/foo/bar/mytest_pkey.pem
-    ///
-    /// If the path do not exist it will be created
-    fn save<P: AsRef<Path>, F: AsRef<Path>>(
-        &self,
-        path: P,
-        filename: F,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        create_dir_all(&path)?;
-
-        let os_file = filename
-            .as_ref()
-            .file_name()
-            .ok_or("Failed to extract file name")?;
-
-        let write_file = |suffix: &str, content: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
-            let mut new_name = os_file.to_os_string();
-            new_name.push(suffix);
-            let full_path = path.as_ref().join(new_name);
-            let mut file = File::create(full_path)?;
-            file.write_all(content)?;
-            Ok(())
-        };
-        if let Ok(ref key) = self.get_private_key() {
-            write_file("_pkey.pem", key)?;
-        }
-        write_file(self.pem_extension(), &self.get_pem()?)?;
-        Ok(())
-    }
-}
-/// Holds the generated Certificate Signing Request (CSR) and its associated private key.
-pub struct Csr {
-    /// The X.509 certificate signing request.
-    pub csr: X509Req,
-    /// The private key used to generate the CSR.
-    ///
-    /// This is optional to allow flexibility in cases where the key is managed or stored separately.
-    pub pkey: Option<PKey<Private>>,
-}
-
-impl X509Parts for Csr {
-    fn get_pem(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(self.csr.to_pem()?)
-    }
-
-    fn get_private_key(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        match self.pkey {
-            Some(ref pkey) => Ok(pkey.private_key_to_pem_pkcs8()?),
-            _ => Err("No private key found".into()),
-        }
-    }
-    fn pem_extension(&self) -> &'static str {
-        "_csr.pem"
-    }
-}
-/// Helper trait to document that Csr implements X509Common
-pub trait CsrX509Common: X509Common {}
-impl CsrX509Common for Csr {}
-
-/// Holds configuration options for creating a certificate from a Certificate Signing Request (CSR).
-pub struct CsrOptions {
-    valid_to: Asn1Time,
-    valid_from: Asn1Time,
-    ca: bool,
-    policies: Vec<CertificatePolicy>,
-}
-impl Default for CsrOptions {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CsrOptions {
-    /// Creates a default `CsrOptions` instance:
-    /// - `valid_from` is set to today.
-    /// - `valid_to` is set to one year from today.
-    /// - `ca` is set to `false`.
-    pub fn new() -> Self {
-        Self {
-            ca: false,
-            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
-            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
-            policies: Default::default(),
-        }
-    }
-
-    /// Sets the start date from which the certificate should be valid.
-    ///
-    /// # Arguments
-    /// * `valid_from` - A string in the format `yyyy-mm-dd`.
-    pub fn valid_from(mut self, valid_from: &str) -> Self {
-        self.valid_from =
-            create_asn1_time_from_date(valid_from).expect("Failed to parse valid_from date");
-        self
-    }
-
-    /// Sets the end date after which the certificate should no longer be valid.
-    ///
-    /// # Arguments
-    /// * `valid_to` - A string in the format `yyyy-mm-dd`.
-    pub fn valid_to(mut self, valid_to: &str) -> Self {
-        self.valid_to =
-            create_asn1_time_from_date(valid_to).expect("Failed to parse valid_to date");
-        self
-    }
-
-    /// Specifies whether the certificate should be a Certificate Authority (CA).
-    ///
-    /// # Arguments
-    /// * `ca` - `true` if the certificate should be a CA, `false` otherwise.
-    pub fn is_ca(mut self, ca: bool) -> Self {
-        self.ca = ca;
-        self
-    }
-    /// Add optional certificate policies
-    ///
-    /// # Arguments
-    /// * `policies` - A list of certificate policies
-    pub fn certificate_policies(mut self, policies: Vec<CertificatePolicy>) -> Self {
-        self.policies = policies;
-        self
-    }
-}
-impl Csr {
-    /// Read a certificate signing request from file
-    pub fn load_csr<C: AsRef<Path>>(csr_pem_file: C) -> Result<Self, Box<dyn std::error::Error>> {
-        let cert_pem = std::fs::read(csr_pem_file)?;
-        let cs_req = X509Req::from_pem(&cert_pem)?;
-        Ok(Self {
-            csr: cs_req,
-            pkey: None,
-        })
-    }
-    /// Create a signed certificate from a certificate signing request(csr)
-    pub fn build_signed_certificate(
-        &self,
-        signer: &Certificate,
-        options: CsrOptions,
-    ) -> Result<Certificate, Box<dyn std::error::Error>> {
-        let can_sign = can_sign_cert(&signer.x509)?;
-        if !can_sign {
-            let err = format!(
-                "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:{:?}",
-                signer.x509.issuer_name()
-            );
-            return Err(err.into());
-        }
-        let mut builder = X509Builder::new()?;
-        builder.set_version(2)?;
-        builder.set_subject_name(self.csr.subject_name())?;
-        builder.set_issuer_name(signer.x509.subject_name())?;
-        let csr_public_key = self.csr.public_key()?;
-        builder.set_pubkey(&csr_public_key)?;
-
-        let der = self.csr.to_der()?;
-        let parsed_csr = X509CertificationRequest::from_der(&der)?;
-
-        let req_ext = parsed_csr.1.requested_extensions();
-        let mut any_key_used = false;
-        if let Some(exts) = req_ext {
-            for ext in exts {
-                match ext {
-                    ParsedExtension::KeyUsage(ku) => {
-                        any_key_used = true;
-                        let mut cert_sign_added = false;
-                        let mut crl_sign_added = false;
-                        let mut usage = openssl::x509::extension::KeyUsage::new();
-                        if ku.digital_signature() {
-                            usage.digital_signature();
-                        }
-                        if ku.key_encipherment() {
-                            usage.key_encipherment();
-                        }
-                        if ku.key_cert_sign() {
-                            cert_sign_added = true;
-                            usage.key_cert_sign();
-                        }
-                        if ku.non_repudiation() {
-                            usage.non_repudiation();
-                        }
-                        if ku.crl_sign() {
-                            crl_sign_added = true;
-                            usage.crl_sign();
-                        }
-
-                        if options.ca {
-                            if !cert_sign_added {
-                                usage.key_cert_sign();
-                            }
-                            if !crl_sign_added {
-                                usage.crl_sign();
-                            }
-                        }
-                        builder.append_extension(usage.build()?)?;
-                    }
-                    ParsedExtension::ExtendedKeyUsage(eku) => {
-                        let mut ext = openssl::x509::extension::ExtendedKeyUsage::new();
-                        if eku.server_auth {
-                            ext.server_auth();
-                        }
-                        if eku.client_auth {
-                            ext.client_auth();
-                        }
-                        if eku.code_signing {
-                            ext.code_signing();
-                        }
-                        if eku.email_protection {
-                            ext.email_protection();
-                        }
-                        builder.append_extension(ext.build()?)?;
-                    }
-                    ParsedExtension::SubjectAlternativeName(san) => {
-                        let mut openssl_san =
-                            openssl::x509::extension::SubjectAlternativeName::new();
-                        for name in &san.general_names {
-                            if let x509_parser::extensions::GeneralName::DNSName(dns) = name {
-                                openssl_san.dns(dns);
-                            }
-                        }
-                        builder.append_extension(
-                            openssl_san.build(&builder.x509v3_context(None, None))?,
-                        )?;
-                    }
-                    _ => {
-                        println!("Unsupported extension: {:?}", ext);
-                    }
-                }
-            }
-        }
-        if options.ca {
-            builder.append_extension(BasicConstraints::new().ca().critical().build()?)?;
-            if !any_key_used {
-                let key_usage = KeyUsage::new().key_cert_sign().crl_sign().build().unwrap();
-                builder.append_extension(key_usage)?;
-            }
-        } else {
-            builder.append_extension(BasicConstraints::new().build()?)?;
-        }
-        builder.set_not_before(&options.valid_from)?;
-        builder.set_not_after(&options.valid_to)?;
-        let serial_number = {
-            let mut serial = BigNum::new()?;
-            serial.rand(159, openssl::bn::MsbOption::MAYBE_ZERO, false)?;
-            serial.to_asn1_integer()?
-        };
-        builder.set_serial_number(&serial_number)?;
-        if signer.x509.subject_key_id().is_some() {
-            let aki = AuthorityKeyIdentifier::new()
-                .keyid(true)
-                .issuer(false)
-                .build(&builder.x509v3_context(Some(&signer.x509), None))?;
-            builder.append_extension(aki)?;
-        }
-        let oid = Asn1Object::from_str("2.5.29.14")?; // OID för Subject Key Identifier (SKI)
-        let pubkey_der = self.csr.public_key().unwrap().public_key_to_der()?;
-        let ski_hash = hash(MessageDigest::sha1(), &pubkey_der)?;
-        let der_encoded = yasna::construct_der(|writer| {
-            writer.write_bytes(ski_hash.as_ref());
-        });
-        let ski_asn1 = Asn1OctetString::new_from_bytes(&der_encoded)?;
-        let ext = X509Extension::new_from_der(oid.as_ref(), false, &ski_asn1)?;
-        builder.append_extension(ext)?;
-        append_certificate_policies(&mut builder, &options.policies)?;
-        let cert: X509 = if is_digestless_key(signer.pkey.as_ref().unwrap()) {
-            let builder_cert = builder.build();
-            sign_certificate_digestless(&builder_cert, signer.pkey.as_ref().unwrap())
-                .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
-            builder_cert
-        } else {
-            builder.sign(signer.pkey.as_ref().unwrap(), MessageDigest::sha256())?;
-            builder.build()
-        };
-
-        Ok(Certificate {
-            x509: cert,
-            pkey: None,
-        })
-    }
-}
 /// Holds the generated X.509 certificate and its associated private key.
 #[derive(Clone)]
 pub struct Certificate {
@@ -850,185 +104,18 @@ impl Certificate {
     }
 }
 
-/// Defines a common interface for setting X509 certificate or CSR builder fields.
-pub trait BuilderCommon {
-    fn set_common_name(&mut self, name: &str);
-    fn set_signer(&mut self, signer: &str);
-    fn set_country_name(&mut self, name: &str);
-    fn set_state_province(&mut self, name: &str);
-    fn set_organization(&mut self, name: &str);
-    fn set_organization_unit(&mut self, name: &str);
-    fn set_alternative_names(&mut self, alternative_names: Vec<&str>);
-    fn set_locality_time(&mut self, locality_time: &str);
-    fn set_key_type(&mut self, key_type: KeyType);
-    fn set_signature_alg(&mut self, signature_alg: HashAlg);
-    fn set_key_usage(&mut self, key_usage: HashSet<Usage>);
-}
-
-/// Stores common configurable fields used during X509 certificate or CSR generation.
-#[derive(Debug)]
-pub struct BuilderFields {
-    common_name: String,
-    signer: Option<String>, //place holder for maybe future use??
-    alternative_names: HashSet<String>,
-    organization_unit: String,
-    country_name: String,
-    state_province: String,
-    organization: String,
-    locality_time: String,
-    key_type: Option<KeyType>,
-    signature_alg: Option<HashAlg>,
-    usage: Option<HashSet<Usage>>,
-}
-impl BuilderCommon for BuilderFields {
-    // Sets the common name, CN. This value will also be added to alternaitve_names
-    fn set_common_name(&mut self, common_name: &str) {
-        self.common_name = common_name.into();
-        self.alternative_names.insert(String::from(common_name));
-    }
-    // A list of altrnative names(SAN) the Common Name(CN) is always included
-    fn set_alternative_names(&mut self, alternative_names: Vec<&str>) {
-        self.alternative_names
-            .extend(vec_str_to_hs!(alternative_names));
-    }
-    // maybe
-    fn set_signer(&mut self, signer: &str) {
-        self.signer = Some(signer.into());
-    }
-    // Country, a valid two char value
-    fn set_country_name(&mut self, country_name: &str) {
-        self.country_name = country_name.into();
-    }
-    // State, province an utf-8 value
-    fn set_state_province(&mut self, state_province: &str) {
-        self.state_province = state_province.into();
-    }
-    // Org. an utf-8 value
-    fn set_organization(&mut self, organization: &str) {
-        self.organization = organization.into();
-    }
-    // Org. unit an utf-8 value
-    fn set_organization_unit(&mut self, organization_unit: &str) {
-        self.organization_unit = organization_unit.into();
-    }
-    // Locality, represents the city, town, or locality of the certificate subject
-    fn set_locality_time(&mut self, locality_time: &str) {
-        self.locality_time = locality_time.into();
-    }
-    // Selects what type of key to use RSA or elliptic
-    fn set_key_type(&mut self, key_type: KeyType) {
-        self.key_type = Some(key_type);
-    }
-    // Selects what alg to use for signature
-    fn set_signature_alg(&mut self, signature_alg: HashAlg) {
-        self.signature_alg = Some(signature_alg);
-    }
-
-    // Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
-    fn set_key_usage(&mut self, key_usage: HashSet<Usage>) {
-        match &mut self.usage {
-            Some(existing_usage) => {
-                existing_usage.extend(key_usage);
-            }
-            None => {
-                self.usage = Some(key_usage);
-            }
-        };
-    }
-}
-
-impl Default for BuilderFields {
-    /// Returns default values for all fields
-    fn default() -> Self {
-        Self {
-            common_name: Default::default(),
-            signer: Default::default(),
-            alternative_names: Default::default(),
-            country_name: Default::default(),
-            state_province: Default::default(),
-            organization: Default::default(),
-            organization_unit: Default::default(),
-            locality_time: Default::default(),
-            key_type: Default::default(),
-            signature_alg: Default::default(),
-            usage: Default::default(),
-        }
-    }
-}
-/// Provides a builder interface for configuring X509 certificate or CSR fields.
-pub trait UseesBuilderFields: Sized {
-    /// Returns a mutable reference to the internal `BuilderFields` structure.
-    fn fields_mut(&mut self) -> &mut BuilderFields;
-
-    /// Sets the Common Name (CN) of the certificate subject.
-    ///
-    /// This value will also be added to the list of Subject Alternative Names (SAN).
-    fn common_name(mut self, common_name: &str) -> Self {
-        self.fields_mut().set_common_name(common_name);
-        self
-    }
-    /// Sets the signer name or identifier for the certificate.
-    fn signer(mut self, signer: &str) -> Self {
-        self.fields_mut().set_signer(signer);
-        self
-    }
-    /// Sets the list of Subject Alternative Names (SAN).
-    ///
-    /// The Common Name (CN) is always included automatically.
-    fn alternative_names(mut self, alternative_names: Vec<&str>) -> Self {
-        self.fields_mut().set_alternative_names(alternative_names);
-        self
-    }
-    /// Sets the country name (C), which must be a valid two-letter country code.
-    fn country_name(mut self, country_name: &str) -> Self {
-        self.fields_mut().set_country_name(country_name);
-        self
-    }
-    /// Sets the state or province name (ST) as a UTF-8 string.
-    fn state_province(mut self, state_province: &str) -> Self {
-        self.fields_mut().set_state_province(state_province);
-        self
-    }
-    /// Sets the organization name (O) as a UTF-8 string.
-    fn organization(mut self, organization: &str) -> Self {
-        self.fields_mut().set_organization(organization);
-        self
-    }
-    /// Sets the locality name (L), typically representing the city or town.
-    fn locality_time(mut self, locality_time: &str) -> Self {
-        self.fields_mut().set_locality_time(locality_time);
-        self
-    }
-    /// Sets the type of key to generate (e.g., RSA or Elliptic Curve).
-    fn key_type(mut self, key_type: KeyType) -> Self {
-        self.fields_mut().set_key_type(key_type);
-        self
-    }
-    /// Sets the signature algorithm to use when signing the certificate.
-    fn signature_alg(mut self, signature_alg: HashAlg) -> Self {
-        self.fields_mut().set_signature_alg(signature_alg);
-        self
-    }
-
-    /// Sets the allowed usages for the certificate (e.g., key signing, digital signature).
-    ///
-    /// This includes both `KeyUsage` and `ExtendedKeyUsage` extensions.
-    fn key_usage(mut self, key_usage: HashSet<Usage>) -> Self {
-        self.fields_mut().set_key_usage(key_usage);
-        self
-    }
-}
-
 /// Builder for creating a new certificate and private key
-pub struct CertBuilder {
+pub struct CertBuilder<P = PathLenUnset> {
     fields: BuilderFields,
     valid_from: Asn1Time,
     valid_to: Asn1Time,
     policies: Vec<CertificatePolicy>,
     ca: bool,
+    path_len: Option<u32>,
+    _marker: PhantomData<P>,
 }
 
-impl UseesBuilderFields for CertBuilder {
+impl<P> UseesBuilderFields for CertBuilder<P> {
     fn fields_mut(&mut self) -> &mut BuilderFields {
         &mut self.fields
     }
@@ -1039,17 +126,7 @@ impl Default for CertBuilder {
     }
 }
 
-impl CertBuilder {
-    /// Create a new CertBuilder with defaults and one year from now as valid date
-    pub fn new() -> Self {
-        Self {
-            fields: BuilderFields::default(),
-            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
-            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
-            ca: false,
-            policies: Default::default(),
-        }
-    }
+impl<P> CertBuilder<P> {
     /// Add optional certificate policies
     ///
     /// # Arguments
@@ -1088,6 +165,22 @@ impl CertBuilder {
         }
         self
     }
+    /// Add optional path length, it is the max number of **non-self-issued
+    /// intermediate CA certs** that may follow this cert in a chain
+    ///
+    /// # Arguments
+    /// * `path_len`- u32
+    pub fn pathlen(self, path_len: u32) -> CertBuilder<PathLenSet> {
+        CertBuilder {
+            fields: self.fields,
+            valid_from: self.valid_from,
+            valid_to: self.valid_to,
+            policies: self.policies,
+            ca: self.ca,
+            path_len: Some(path_len),
+            _marker: PhantomData,
+        }
+    }
 
     /// create a self signed x509 certificate and private key
     pub fn build_and_self_sign(&self) -> Result<Certificate, Box<dyn std::error::Error>> {
@@ -1096,13 +189,13 @@ impl CertBuilder {
         // ML-KEM keys cannot produce signatures, so a self-signed certificate is
         // impossible — issue via build_and_sign() with a separate signing CA.
         #[cfg(feature = "pqc")]
-        if is_mlkem_pkey(&pkey) {
-            return Err("ML-KEM (FIPS 203) is a key-encapsulation key and cannot \
-                produce signatures, so it cannot self-sign a certificate. Issue an \
-                ML-KEM certificate with CertBuilder::build_and_sign() using a signing \
-                CA (e.g. an ML-DSA or ECDSA CA) instead."
-                .into());
-        }
+        reject_mlkem_signing(
+            &pkey,
+            "ML-KEM (FIPS 203) is a key-encapsulation key and cannot produce \
+             signatures, so it cannot self-sign a certificate. Issue an ML-KEM \
+             certificate with CertBuilder::build_and_sign() using a signing CA \
+             (e.g. an ML-DSA or ECDSA CA) instead.",
+        )?;
 
         let ca_cert: X509 = if is_digestless_key(&pkey) {
             let build_cert = builder.build();
@@ -1116,35 +209,6 @@ impl CertBuilder {
 
         Ok(Certificate {
             x509: ca_cert,
-            pkey: Some(pkey),
-        })
-    }
-    /// Create a signed certificate and private key
-    pub fn build_and_sign(
-        &self,
-        signer: &Certificate,
-    ) -> Result<Certificate, Box<dyn std::error::Error>> {
-        let can_sign = can_sign_cert(&signer.x509)?;
-        if !can_sign {
-            let err = format!(
-                "Trying to sign with non CA and/or no key usage that allow signing for signer certificate:{:?}",
-                signer.x509.issuer_name()
-            );
-            return Err(err.into());
-        }
-        let (mut builder, pkey) = self.prepare_x509_builder(Some(signer))?;
-        let signer_key = signer.pkey.as_ref().unwrap();
-        let cert: X509 = if is_digestless_key(signer_key) {
-            let build_cert = builder.build();
-            sign_certificate_digestless(&build_cert, signer_key)
-                .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
-            build_cert
-        } else {
-            builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
-            builder.build()
-        };
-        Ok(Certificate {
-            x509: cert,
             pkey: Some(pkey),
         })
     }
@@ -1197,39 +261,14 @@ impl CertBuilder {
 
         let key_usage = self.fields.usage.clone().unwrap_or_default();
         append_certificate_policies(&mut builder, &self.policies)?;
-        // Post-quantum signature keys (ML-DSA / SLH-DSA) are signature-only and
-        // cannot perform key encipherment; reject the contradictory combination.
+        // Enforce post-quantum KeyUsage rules (signature-only ML-DSA/SLH-DSA vs
+        // keyEncipherment-only ML-KEM). See validate_pqc_key_usage.
         #[cfg(feature = "pqc")]
-        {
-            if is_pqc_pkey(&pkey) && key_usage.contains(&Usage::encipherment) {
-                return Err("keyEncipherment (Usage::encipherment) is not valid for a \
-                    post-quantum signature key (ML-DSA / SLH-DSA): these algorithms are \
-                    signature-only and cannot perform key encipherment. Use Usage::signature \
-                    (and certsign/crlsign for a CA) instead."
-                    .into());
-            }
-        }
-
-        // ML-KEM (FIPS 203) is a key-encapsulation key. Per
-        // draft-ietf-lamps-kyber-certificates, when an ML-KEM key appears in the
-        // SPKI and KeyUsage is present it MUST assert keyEncipherment and nothing
-        // else (no digitalSignature, keyAgreement, dataEncipherment, etc.).
-        #[cfg(feature = "pqc")]
-        {
-            if is_mlkem_pkey(&pkey)
-                && !key_usage.is_empty()
-                && key_usage != HashSet::from([Usage::encipherment])
-            {
-                return Err("an ML-KEM (FIPS 203) key may only assert keyEncipherment \
-                    (Usage::encipherment) in its KeyUsage — no other bit is permitted \
-                    (no digitalSignature, keyAgreement, dataEncipherment, certsign, or \
-                    crlsign). Set key_usage to exactly {Usage::encipherment}, or omit it."
-                    .into());
-            }
-        }
+        validate_pqc_key_usage(&pkey, &key_usage)?;
 
         if self.ca {
-            builder.append_extension(BasicConstraints::new().ca().critical().build()?)?;
+            let result = ca_basic_constraints(self.path_len)?;
+            builder.append_extension(result)?;
         } else {
             builder.append_extension(BasicConstraints::new().build()?)?;
         }
@@ -1298,270 +337,101 @@ impl CertBuilder {
     }
 }
 
-/// Builder for creating a new certificate signing request and private key
-pub struct CsrBuilder {
-    fields: BuilderFields,
-}
-impl UseesBuilderFields for CsrBuilder {
-    fn fields_mut(&mut self) -> &mut BuilderFields {
-        &mut self.fields
-    }
-}
-impl Default for CsrBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CsrBuilder {
-    /// Create a new CsrBuilder with defaults
+impl CertBuilder<PathLenUnset> {
+    /// Create a new CertBuilder with defaults and one year from now as valid date
     pub fn new() -> Self {
         Self {
             fields: BuilderFields::default(),
+            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
+            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
+            ca: false,
+            policies: Default::default(),
+            path_len: None,
+            _marker: PhantomData,
         }
     }
-
-    /// Builds and returns a Certificate Signing Request (CSR) based on the configured builder fields.
-    ///
-    /// This function constructs the subject name, sets the public key, and adds relevant X.509 extensions
-    /// such as Key Usage, Extended Key Usage, and Subject Alternative Names (SAN).
-    /// It supports signing with both traditional algorithms and Ed25519.
-    ///
-    /// # Returns
-    /// - `Ok(Csr)` if the CSR was successfully built and signed.
-    /// - `Err(Box<dyn std::error::Error>)` if any step in the CSR creation process fails.
-    ///
-    /// # Errors
-    /// This function may return errors in the following cases:
-    /// - Failure to initialize or build the X509 name or request.
-    /// - Failure to select or use the appropriate key type.
-    /// - Failure to build or add X.509 extensions.
-    /// - Failure to sign the CSR, especially with Ed25519.
-    ///
-    /// # Extensions Added
-    /// - **Key Usage** and **Extended Key Usage**: Based on the builder's `usage` field.
-    /// - **Subject Alternative Names (SAN)**: Includes all entries from `alternative_names`.
-    ///
-    /// # Signing Behavior
-    /// - If the key type is Ed25519, uses a custom signing function.
-    /// - Otherwise, signs using the selected hash algorithm.
-    ///
-    /// # Example
-    /// ```rust
-    /// use cert_helper::certificate::CsrBuilder;
-    /// use crate::cert_helper::certificate::UseesBuilderFields;
-    /// let builder = CsrBuilder::new().common_name("example.com");
-    /// let csr = builder.certificate_signing_request().unwrap();
-    /// ```
-    pub fn certificate_signing_request(self) -> Result<Csr, Box<dyn std::error::Error>> {
-        let mut name_builder = X509NameBuilder::new()?;
-        name_builder.append_entry_by_nid(Nid::COMMONNAME, &self.fields.common_name)?;
-        if !self.fields.country_name.trim().is_empty() {
-            name_builder.append_entry_by_nid(Nid::COUNTRYNAME, &self.fields.country_name)?;
-        }
-        if !self.fields.state_province.trim().is_empty() {
-            name_builder
-                .append_entry_by_nid(Nid::STATEORPROVINCENAME, &self.fields.state_province)?;
-        }
-        if !self.fields.locality_time.trim().is_empty() {
-            name_builder.append_entry_by_nid(Nid::LOCALITYNAME, &self.fields.locality_time)?;
-        }
-        if !self.fields.organization.trim().is_empty() {
-            name_builder.append_entry_by_nid(Nid::ORGANIZATIONNAME, &self.fields.organization)?;
-        }
-        let name = name_builder.build();
-        let mut builder = X509ReqBuilder::new()?;
-        builder.set_version(0)?;
-        builder.set_subject_name(&name)?;
-        let pkey = select_key(&self.fields.key_type).unwrap();
-        builder.set_pubkey(&pkey)?;
-        let key_usage = self.fields.usage.clone().unwrap_or_default();
-
-        // Post-quantum signature keys (ML-DSA / SLH-DSA) cannot perform key
-        // encipherment; reject the contradictory combination in CSRs too.
-        #[cfg(feature = "pqc")]
-        {
-            if is_pqc_pkey(&pkey) && key_usage.contains(&Usage::encipherment) {
-                return Err("keyEncipherment (Usage::encipherment) is not valid for a \
-                    post-quantum signature key (ML-DSA / SLH-DSA): these algorithms are \
-                    signature-only and cannot perform key encipherment. Use Usage::signature \
-                    instead."
-                    .into());
-            }
-        }
-
-        // ML-KEM keyEncipherment-only lint (see prepare_x509_builder for the
-        // rationale). Checked before the can't-sign guard below so a contradictory
-        // KeyUsage is reported precisely.
-        #[cfg(feature = "pqc")]
-        {
-            if is_mlkem_pkey(&pkey)
-                && !key_usage.is_empty()
-                && key_usage != HashSet::from([Usage::encipherment])
-            {
-                return Err("an ML-KEM (FIPS 203) key may only assert keyEncipherment \
-                    (Usage::encipherment) in its KeyUsage — no other bit is permitted \
-                    (no digitalSignature, keyAgreement, dataEncipherment, certsign, or \
-                    crlsign). Set key_usage to exactly {Usage::encipherment}, or omit it."
-                    .into());
-            }
-        }
-
-        // ML-KEM cannot sign, and a PKCS#10 CSR requires a self-signature for
-        // proof-of-possession — so an ML-KEM CSR cannot be produced here.
-        #[cfg(feature = "pqc")]
-        if is_mlkem_pkey(&pkey) {
-            return Err(
-                "ML-KEM (FIPS 203) is a key-encapsulation key and cannot sign \
-                a CSR (PKCS#10 requires a self-signature for proof-of-possession). \
-                Issue the ML-KEM certificate directly with CertBuilder::build_and_sign() \
-                using a signing CA instead."
-                    .into(),
+    /// Create a signed certificate and private key
+    pub fn build_and_sign(
+        &self,
+        signer: &Certificate,
+    ) -> Result<Certificate, Box<dyn std::error::Error>> {
+        let can_sign = can_sign_cert(signer)?;
+        if !can_sign {
+            let err = format!(
+                "Cannot sign with signer certificate {:?}: it must be a valid CA \
+             (BasicConstraints CA flag set, KeyUsage keyCertSign, within its validity \
+             period) and have an associated private key",
+                signer.x509.subject_name()
             );
+            return Err(err.into());
         }
-
-        let mut extensions = Stack::new()?;
-
-        let (tracked_key_usage, tracked_extended_key_usage) = get_key_usage(&Some(key_usage));
-        if tracked_key_usage.is_used() {
-            extensions.push(tracked_key_usage.inner.build()?)?;
-        }
-        if tracked_extended_key_usage.is_used() {
-            extensions.push(tracked_extended_key_usage.inner.build()?)?;
-        }
-
-        let mut san = SubjectAlternativeName::new();
-        for s in &self.fields.alternative_names {
-            san.dns(s);
-        }
-        extensions.push(san.build(&builder.x509v3_context(None))?)?;
-
-        builder.add_extensions(&extensions)?;
-        let csr: X509Req = if is_digestless_key(&pkey) {
-            let builder_csr = builder.build();
-            sign_x509_req_digestless(&builder_csr, &pkey)
+        let (mut builder, pkey) = self.prepare_x509_builder(Some(signer))?;
+        let signer_key = signer
+            .pkey
+            .as_ref()
+            .ok_or("signer certificate has no associated private key; cannot sign")?;
+        let cert: X509 = if is_digestless_key(signer_key) {
+            let build_cert = builder.build();
+            sign_certificate_digestless(&build_cert, signer_key)
                 .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
-            builder_csr
+            build_cert
         } else {
-            builder.sign(&pkey, select_hash(&self.fields.signature_alg))?;
+            builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
             builder.build()
         };
-        Ok(Csr {
-            csr,
+        Ok(Certificate {
+            x509: cert,
             pkey: Some(pkey),
         })
     }
 }
-struct TrackedExtendedKeyUsage {
-    inner: ExtendedKeyUsage,
-    used: bool,
-}
 
-impl TrackedExtendedKeyUsage {
-    fn new() -> Self {
-        Self {
-            inner: ExtendedKeyUsage::new(),
-            used: false,
+impl CertBuilder<PathLenSet> {
+    pub fn build_and_sign_with_chain(
+        &self,
+        signer: &Certificate,
+        chain: &[&Certificate],
+    ) -> Result<Certificate, Box<dyn std::error::Error>> {
+        let can_sign = can_sign_cert(signer)?;
+        if !can_sign {
+            let err = format!(
+                "Cannot sign with signer certificate {:?}: it must be a valid CA \
+             (BasicConstraints CA flag set, KeyUsage keyCertSign, within its validity \
+             period) and have an associated private key",
+                signer.x509.subject_name()
+            );
+            return Err(err.into());
         }
-    }
+        let chain_x509: Vec<&X509> = chain.iter().map(|c| &c.x509).collect();
+        enforce_path_len(self.ca, self.path_len, signer, &chain_x509)?;
 
-    fn client_auth(&mut self) {
-        self.inner.client_auth();
-        self.used = true;
-    }
-
-    fn server_auth(&mut self) {
-        self.inner.server_auth();
-        self.used = true;
-    }
-
-    fn is_used(&self) -> bool {
-        self.used
-    }
-
-    fn into_inner(self) -> ExtendedKeyUsage {
-        self.inner
-    }
-}
-
-struct TrackedKeyUsage {
-    inner: KeyUsage,
-    used: bool,
-}
-
-impl TrackedKeyUsage {
-    fn new() -> Self {
-        Self {
-            inner: KeyUsage::new(),
-            used: false,
-        }
-    }
-
-    fn digital_signature(&mut self) {
-        self.inner.digital_signature();
-        self.used = true;
-    }
-
-    fn non_repudiation(&mut self) {
-        self.inner.non_repudiation();
-        self.used = true;
-    }
-
-    fn key_encipherment(&mut self) {
-        self.inner.key_encipherment();
-        self.used = true;
-    }
-
-    fn key_cert_sign(&mut self) {
-        self.inner.key_cert_sign();
-        self.used = true;
-    }
-
-    fn crl_sign(&mut self) {
-        self.inner.crl_sign();
-        self.used = true;
-    }
-
-    fn is_used(&self) -> bool {
-        self.used
-    }
-
-    fn into_inner(self) -> KeyUsage {
-        self.inner
+        let (mut builder, pkey) = self.prepare_x509_builder(Some(signer))?;
+        let signer_key = signer
+            .pkey
+            .as_ref()
+            .ok_or("signer certificate has no associated private key; cannot sign")?;
+        let cert: X509 = if is_digestless_key(signer_key) {
+            let build_cert = builder.build();
+            sign_certificate_digestless(&build_cert, signer_key)
+                .map_err(|e| format!("Failed to sign certificate with digestless key: {}", e))?;
+            build_cert
+        } else {
+            builder.sign(signer_key, select_hash(&self.fields.signature_alg))?;
+            builder.build()
+        };
+        Ok(Certificate {
+            x509: cert,
+            pkey: Some(pkey),
+        })
     }
 }
-/// Parse a dotted OID string into a yasna ObjectIdentifier.
-fn parse_oid(dotted: &str) -> Result<ObjectIdentifier, Box<dyn std::error::Error>> {
-    let components = dotted
-        .split('.')
-        .map(|c| c.parse::<u64>())
-        .collect::<Result<Vec<u64>, _>>()
-        .map_err(|_| format!("invalid policy OID: {dotted}"))?;
-    Ok(ObjectIdentifier::new(components))
-}
-
-fn append_certificate_policies(
-    builder: &mut X509Builder,
-    policies: &[CertificatePolicy],
-) -> Result<(), Box<dyn std::error::Error>> {
-    if policies.is_empty() {
-        return Ok(());
+fn ca_basic_constraints(path_len: Option<u32>) -> Result<X509Extension, ErrorStack> {
+    let mut bc = BasicConstraints::new();
+    bc.ca().critical();
+    if let Some(len) = path_len {
+        bc.pathlen(len);
     }
-    let oids = policies
-        .iter()
-        .map(|p| parse_oid(p.oid()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let der = yasna::construct_der(|w| {
-        w.write_sequence(|seq| {
-            for oid in &oids {
-                seq.next().write_sequence(|pi| pi.next().write_oid(oid));
-            }
-        });
-    });
-    let oid = Asn1Object::from_str("2.5.29.32")?;
-    let value = Asn1OctetString::new_from_bytes(&der)?;
-    builder.append_extension(X509Extension::new_from_der(oid.as_ref(), false, &value)?)?;
-    Ok(())
+    bc.build()
 }
 
 /// Verifies a certificate against a root certificate and the intermediate
@@ -1610,7 +480,11 @@ pub fn create_cert_chain_from_cert_list(
     }
 
     // Find leaf certificates (those that are not issuers of any other cert)
-    let all_issuers: Vec<Vec<u8>> = issuer_map.values().cloned().collect();
+    let all_issuers: Vec<Vec<u8>> = issuer_map
+        .iter()
+        .filter(|(subject, issuer)| subject != issuer) // ignore the self-signed self-reference
+        .map(|(_, issuer)| issuer.clone())
+        .collect();
     let leaf_certs: Vec<X509> = subject_map
         .iter()
         .filter(|(subject, _)| !all_issuers.contains(subject))
@@ -1646,123 +520,89 @@ pub fn create_cert_chain_from_cert_list(
     Ok(longest_chain)
 }
 
-fn create_asn1_time_from_date(date_str: &str) -> Result<Asn1Time, Box<dyn std::error::Error>> {
-    let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")?;
-    let datetime = NaiveDateTime::new(date, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-    let utc_datetime = Utc.from_utc_datetime(&datetime);
-    let asn1_time_str = utc_datetime.format("%Y%m%d%H%M%SZ").to_string();
-    let asn1_time = Asn1Time::from_str(&asn1_time_str)?;
-    Ok(asn1_time)
-}
-
-fn select_key(key_type: &Option<KeyType>) -> Result<PKey<Private>, ErrorStack> {
-    match key_type {
-        Some(KeyType::P224) => {
-            let group = EcGroup::from_curve_name(Nid::SECP224R1)?;
-            let ec_key = EcKey::generate(&group)?;
-            PKey::from_ec_key(ec_key)
-        }
-        Some(KeyType::P256) => {
-            let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
-            let ec_key = EcKey::generate(&group)?;
-            PKey::from_ec_key(ec_key)
-        }
-        Some(KeyType::P384) => {
-            let group = EcGroup::from_curve_name(Nid::SECP384R1)?;
-            let ec_key = EcKey::generate(&group)?;
-            PKey::from_ec_key(ec_key)
-        }
-        Some(KeyType::P521) => {
-            let group = EcGroup::from_curve_name(Nid::SECP521R1)?;
-            let ec_key = EcKey::generate(&group)?;
-            PKey::from_ec_key(ec_key)
-        }
-        Some(KeyType::Ed25519) => PKey::generate_ed25519(),
-        #[cfg(feature = "pqc")]
-        Some(KeyType::MlDsa44) => generate_pqc_key("ML-DSA-44"),
-        #[cfg(feature = "pqc")]
-        Some(KeyType::MlDsa65) => generate_pqc_key("ML-DSA-65"),
-        #[cfg(feature = "pqc")]
-        Some(KeyType::MlDsa87) => generate_pqc_key("ML-DSA-87"),
-        #[cfg(feature = "pqc")]
-        Some(KeyType::SlhDsaSha2_128s) => generate_pqc_key("SLH-DSA-SHA2-128s"),
-        #[cfg(feature = "pqc")]
-        Some(KeyType::SlhDsaSha2_192s) => generate_pqc_key("SLH-DSA-SHA2-192s"),
-        #[cfg(feature = "pqc")]
-        Some(KeyType::SlhDsaSha2_256s) => generate_pqc_key("SLH-DSA-SHA2-256s"),
-        #[cfg(feature = "pqc")]
-        Some(KeyType::MlKem512) => generate_pqc_key("ML-KEM-512"),
-        #[cfg(feature = "pqc")]
-        Some(KeyType::MlKem768) => generate_pqc_key("ML-KEM-768"),
-        #[cfg(feature = "pqc")]
-        Some(KeyType::MlKem1024) => generate_pqc_key("ML-KEM-1024"),
-        Some(KeyType::RSA4096) => {
-            let rsa = Rsa::generate(4096)?;
-            PKey::from_rsa(rsa)
-        }
-        _ => {
-            let rsa = Rsa::generate(2048)?;
-            PKey::from_rsa(rsa)
-        }
+fn enforce_path_len(
+    is_ca: bool,
+    path_len: Option<u32>,
+    signer: &Certificate,
+    chain: &[&X509],
+) -> Result<(), Box<dyn std::error::Error>> {
+    // No pathLen set (or non-CA) → nothing to enforce, no chain required.
+    // Matches CertBuilder: a no-pathLen / unlimited CA isn't budget-checked.
+    if !is_ca || path_len.is_none() {
+        return Ok(());
     }
-}
-
-fn select_hash(hash_type: &Option<HashAlg>) -> MessageDigest {
-    match hash_type {
-        Some(HashAlg::SHA1) => MessageDigest::sha1(),
-        Some(HashAlg::SHA384) => MessageDigest::sha384(),
-        Some(HashAlg::SHA512) => MessageDigest::sha512(),
-        _ => MessageDigest::sha256(),
+    let budget = verify_cert_path(signer, chain)?;
+    if let (Some(b), Some(m)) = (budget, path_len)
+        && m >= b
+    {
+        return Err("requested pathLen exceeds what the signer's chain permits".into());
     }
+    Ok(())
 }
 
-fn get_key_usage(usage: &Option<HashSet<Usage>>) -> (TrackedKeyUsage, TrackedExtendedKeyUsage) {
-    let mut ku = TrackedKeyUsage::new();
-    let mut eku = TrackedExtendedKeyUsage::new();
-    if let Some(usages) = usage {
-        for u in usages {
-            match u {
-                Usage::contentcommitment => {
-                    ku.non_repudiation();
-                }
-                Usage::encipherment => {
-                    ku.key_encipherment();
-                }
-                Usage::certsign => {
-                    ku.key_cert_sign();
-                }
-                Usage::clientauth => {
-                    eku.client_auth();
-                }
-                Usage::signature => {
-                    ku.digital_signature();
-                }
-                Usage::crlsign => {
-                    ku.crl_sign();
-                }
-                Usage::serverauth => {
-                    eku.server_auth();
+fn verify_cert_path(
+    signer: &Certificate,
+    chain: &[&X509],
+) -> Result<Option<u32>, Box<dyn std::error::Error>> {
+    let mut owned: Vec<X509> = chain.iter().map(|c| (*c).clone()).collect();
+    owned.push(signer.x509.clone());
+    let ordered = create_cert_chain_from_cert_list(owned)?;
+    let root = ordered.first().unwrap();
+    let pubkey = root.public_key()?;
+    if !root.verify(&pubkey)? {
+        let err = format!(
+            "Could not find self signed root, found last ancestor {:?}",
+            root.subject_name()
+        );
+        return Err(err.into());
+    }
+    let signer = ordered.last().unwrap();
+    let intermediates: Vec<&X509> = ordered
+        .get(1..ordered.len().saturating_sub(1)) // 1..0 → None for len==1
+        .unwrap_or(&[])
+        .iter()
+        .collect();
+    match verify_cert(signer, root, intermediates) {
+        Ok(true) => {
+            let mut budget: Option<i64> = None;
+            for (d, ancestor) in ordered.iter().rev().enumerate() {
+                if let Some(p) = ancestor.pathlen() {
+                    // ancestor's declared pathLen
+                    let candidate = p as i64 - d as i64; // can be negative — that's fine
+                    budget = Some(budget.map_or(candidate, |b| b.min(candidate)));
                 }
             }
+            match budget {
+                Some(b) if b < 1 => {
+                    Err("signer's path length budget is exhausted; cannot issue a CA".into())
+                }
+                Some(b) => Ok(Some(b as u32)), // b >= 1 here, cast is safe
+                None => Ok(None),              // no pathLen anywhere → unlimited
+            }
+        }
+        _ => {
+            let err = format!(
+                "Cannot verify the crtificate chain for {:?}",
+                signer.subject_name()
+            );
+            Err(err.into())
         }
     }
-
-    (ku, eku)
 }
 
-fn can_sign_cert(cert: &X509) -> Result<bool, Box<dyn std::error::Error>> {
-    let der = cert.to_der()?;
+fn can_sign_cert(cert: &Certificate) -> Result<bool, Box<dyn std::error::Error>> {
+    if cert.pkey.is_none() {
+        return Ok(false);
+    }
+
+    let der = cert.x509.to_der()?;
     let (_, parsed_cert) = parse_x509_certificate(&der)?;
 
     let mut is_ca = false;
     let mut can_sign = false;
-
-    // Compare the validity window using OpenSSL's native ASN.1 time comparison
-    // instead of a panic-prone string round-trip through chrono: `not_before`
-    // must be at or before now, and now must be strictly before `not_after`.
     let now = Asn1Time::days_from_now(0)?;
-    let valid_time = cert.not_before().compare(&now)? != std::cmp::Ordering::Greater
-        && cert.not_after().compare(&now)? == std::cmp::Ordering::Greater;
+    let valid_time = cert.x509.not_before().compare(&now)? != std::cmp::Ordering::Greater
+        && cert.x509.not_after().compare(&now)? == std::cmp::Ordering::Greater;
 
     for ext in parsed_cert.tbs_certificate.extensions().iter() {
         match &ext.parsed_extension() {
@@ -1781,9 +621,210 @@ fn can_sign_cert(cert: &X509) -> Result<bool, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::io::Write;
     use std::path::Path;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn create_ca_with_path_len_set() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_self_sign()
+            .unwrap();
+        assert_eq!(ca.x509.pathlen(), Some(0));
+    }
+
+    #[test]
+    fn create_ca_with_no_path_len_set() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        assert_eq!(ca.x509.pathlen(), None);
+    }
+
+    #[test]
+    fn incomplete_chain_without_root_is_rejected() {
+        let ca = CertBuilder::new()
+            .common_name("Root")
+            .is_ca(true)
+            .pathlen(2)
+            .build_and_self_sign()
+            .unwrap();
+        let inter = CertBuilder::new()
+            .common_name("Inter")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_sign_with_chain(&ca, &[])
+            .unwrap();
+
+        // sign with `inter` but forget to pass its chain → top of chain is `inter`,
+        // which is not self-signed → reject
+        let err = CertBuilder::new()
+            .common_name("Sub")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_sign_with_chain(&inter, &[])
+            .err()
+            .expect("incomplete chain (missing root) must be rejected");
+        assert!(
+            err.to_string().contains("Could not find self signed root"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn unlimited_root_can_issue_ca() {
+        let root = CertBuilder::new()
+            .common_name("Unlimited Root")
+            .is_ca(true) // note: no .pathlen() → None / unlimited
+            .build_and_self_sign()
+            .unwrap();
+        assert_eq!(root.x509.pathlen(), None);
+
+        // budget is None → no ceiling; even a large declared pathLen is fine
+        let inter = CertBuilder::new()
+            .common_name("Inter")
+            .is_ca(true)
+            .pathlen(5)
+            .build_and_sign_with_chain(&root, &[])
+            .unwrap();
+        assert_eq!(inter.x509.pathlen(), Some(5));
+    }
+
+    #[test]
+    fn create_cert_chain_and_verify() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_self_sign()
+            .unwrap();
+        let chain: Vec<&Certificate> = Vec::new();
+        let inter_ca = CertBuilder::new()
+            .common_name("My Test inter Ca")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_sign_with_chain(&ca, chain.as_slice())
+            .unwrap();
+        let leaf = CertBuilder::new()
+            .common_name("My Test leaf")
+            .build_and_sign(&inter_ca)
+            .unwrap();
+        assert_eq!(ca.x509.pathlen(), Some(1));
+        assert_eq!(leaf.x509.pathlen(), None);
+        assert!(verify_cert(&leaf.x509, &ca.x509, vec![&inter_ca.x509]).unwrap());
+    }
+
+    #[test]
+    fn create_ca_cert_chain_and_verify() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(2)
+            .build_and_self_sign()
+            .unwrap();
+        let chain: Vec<&Certificate> = Vec::new();
+        let inter_ca = CertBuilder::new()
+            .common_name("My Test inter Ca")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_sign_with_chain(&ca, chain.as_slice())
+            .unwrap();
+        let leaf = CertBuilder::new()
+            .common_name("leaf ca")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_sign_with_chain(&inter_ca, &[&ca])
+            .unwrap();
+
+        assert_eq!(leaf.x509.pathlen(), Some(0));
+    }
+
+    #[test]
+    fn can_not_create_ca_cert_chain_with_wrong_intermediate_ca_path() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(2)
+            .build_and_self_sign()
+            .unwrap();
+        let chain: Vec<&Certificate> = Vec::new();
+        let inter_ca = CertBuilder::new()
+            .common_name("My Test inter Ca")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_sign_with_chain(&ca, chain.as_slice())
+            .unwrap();
+        let err = CertBuilder::new()
+            .common_name("leaf ca")
+            .is_ca(true)
+            .pathlen(0)
+            .build_and_sign_with_chain(&inter_ca, &[&ca])
+            .err()
+            .expect("");
+
+        assert!(
+            err.to_string()
+                .contains("signer's path length budget is exhausted; cannot issue a CA"),
+            "signer's path length budget is exhausted; cannot issue a CA got: {err}"
+        );
+    }
+
+    #[test]
+    fn root_ca_have_one_path_length_and_can_not_sign_ca() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_self_sign()
+            .unwrap();
+
+        let chain: Vec<&Certificate> = Vec::new();
+
+        // A user mistake: an intermediate claiming pathlen(1) under a root that only
+        // permits one CA below it. Must be rejected at issuance.
+        let err = CertBuilder::new()
+            .common_name("My Test inter Ca")
+            .is_ca(true)
+            .pathlen(1)
+            .build_and_sign_with_chain(&ca, chain.as_slice())
+            .err()
+            .expect("inter CA with pathlen(1) under root pathlen(1) must be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("requested pathLen exceeds what the signer's chain permits"),
+            "expected a pathLen-exceeds error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn build_and_sign_without_signer_private_key_errors_not_panics() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        let keyless_ca = Certificate {
+            x509: ca.x509.clone(),
+            pkey: None,
+        };
+
+        let err = CertBuilder::new()
+            .common_name("leaf")
+            .build_and_sign(&keyless_ca)
+            .err()
+            .expect("signing with a key-less CA must return an error, not panic");
+        assert!(
+            err.to_string().contains("private key"),
+            "expected a missing-private-key error, got: {err}"
+        );
+    }
 
     #[test]
     fn save_certificate() {
@@ -1843,30 +884,5 @@ IQ==
             "Failed to load cert and key: {:?}",
             result.err()
         );
-    }
-
-    #[test]
-    fn test_reading_csr_from_file() {
-        let csr_data = b"-----BEGIN CERTIFICATE REQUEST-----
-MIICzDCCAbQCAQAwXTEVMBMGA1UEAwwMZXhhbXBsZTIuY29tMQswCQYDVQQGEwJT
-RTESMBAGA1UECAwJU3RvY2tob2xtMRIwEAYDVQQHDAlTdG9ja2hvbG0xDzANBgNV
-BAoMBk15IG9yZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAIeAXpCG
-hbIayESfdTzOO0DxIMsOAu4kUm0zF0W/+xDUHl6bGy3wlB9S9nzBG/qwqFZ27Om3
-o4zrZ8K8DBx0ERWNuhMmr0Nx8QpAWBEyxOc08Gn4c3XVBBkRZSn4AIqr9DGtcUqW
-tQZXvMGF6sRRljiEvOxO6zMzZKTGYwzIeQvH85cQ3uXsw0Kknsw/fcuywaAC8SS9
-aqs4jiEIgzdhxdH2OVXBNGj4cjVhK309JiWFHS9XJLNV/PKC+F1nkaANQwbW5A4F
-9vya4js9gk8f4SfF1u+qOJEvsDvAb+1xdjXPRzf77eGh3rC4KgGWQ6WrWfW8PItF
-BDg/jskq3bJXNL8CAwEAAaAqMCgGCSqGSIb3DQEJDjEbMBkwFwYDVR0RBBAwDoIM
-ZXhhbXBsZTIuY29tMA0GCSqGSIb3DQEBCwUAA4IBAQAHeeSW8C6SMVhWiMvPn7iz
-FUHQedHRyPz6kTEfC01eNIbs0r4YghOAcm8PF67jncIXVrqgxo1uzq12qlV+0YYb
-jps31IbQNOz0eFLYvij15ielmOYeQZZ/2vqaGi3geVobLc6Ki5tadnA/NhjTN33j
-QcqDDic8riAOTbSQ6TH9KPTGJQOPk+taMpDGDHskIW0oME5iT2ewbhBHg6v/kSzy
-tss2kBY5O7vo2COtbNcwX5Xp9S2LH9kVUKr0GIjuQjwbv5xl+GNdDey09W9EDACU
-jcGV3++2wS4LN4h3CG4pWZ+LTXhm8ymhoWOapN95lfe3xLRAKFJwiLkGwS75++FW
------END CERTIFICATE REQUEST-----";
-        let mut csr_file = NamedTempFile::new().expect("Failed to create temp csr file");
-        csr_file.write_all(csr_data).expect("Failed to write csr");
-        let result = Csr::load_csr(csr_file.path());
-        assert!(result.is_ok(), "Failed to load csr: {:?}", result.err());
     }
 }

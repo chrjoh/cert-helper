@@ -1,6 +1,21 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [0.4.8] - 2026-06-27
+
+### Added
+- Path length constraint support: `CertBuilder::pathlen` and `CsrOptions::pathlen`
+  set the BasicConstraints path length (max intermediate CAs below the cert).
+- `CertBuilder::build_and_sign_with_chain` issues a CA and enforces the path
+  length against the signer's chain — rejecting a CA that exceeds what its issuer
+  permits. The same enforcement applies when issuing from a CSR.
+
+### Changed
+- Add validation that a certificate signing request with PQC key and 
+  keyEncipherment key usage do not return a signed certificate
+- Added so that the public key in the Certificate signing request is 
+  validated before a certificate is generated
+
 ## [0.4.7] - 2026-06-20
 
 ### Added
