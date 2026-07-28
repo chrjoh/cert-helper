@@ -1,6 +1,20 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [0.4.9] - 2026-07-28
+
+### Added
+- `Certificate::load_cert` — loads an X.509 certificate from a PEM file without a
+  private key (`pkey: None`). Intended for chain entries passed to
+  `CertBuilder::build_and_sign_with_chain` or `CsrOptions::pathlen`, which read
+  the certificate but never the key.
+- `Certificate` now derives `Debug`, so it (and types wrapping it) can be used
+  with `assert!`/`unwrap_err` and logged. The `pkey` field prints opaquely and
+  does not expose private key material.
+
+### Changed
+- Bumped `num-bigint` dependency from 0.4.6 to 0.5.1.
+
 ## [0.4.8] - 2026-06-27
 
 ### Added

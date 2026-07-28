@@ -56,7 +56,10 @@ pub struct PathLenUnset;
 pub struct PathLenSet;
 
 /// Holds the generated X.509 certificate and its associated private key.
-#[derive(Clone)]
+///
+/// `Debug` is derived; the `pkey` field prints opaquely (openssl's `PKey`
+/// `Debug` does not expose key material), so it is safe to log a `Certificate`.
+#[derive(Clone, Debug)]
 pub struct Certificate {
     /// The X.509 certificate.
     pub x509: X509,
@@ -100,6 +103,24 @@ impl Certificate {
         Ok(Self {
             x509: cert,
             pkey: Some(pkey),
+        })
+    }
+
+    /// Loads an X.509 certificate (without a private key) from a PEM file.
+    ///
+    /// The returned [`Certificate`] has `pkey: None`. This is intended for chain
+    /// entries passed to [`CertBuilder::build_and_sign_with_chain`] or
+    /// [`CsrOptions::pathlen`], which only read the certificate, never the key.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be read or does not contain a valid
+    /// PEM-encoded X.509 certificate.
+    pub fn load_cert<C: AsRef<Path>>(cert_pem_file: C) -> Result<Self, Box<dyn std::error::Error>> {
+        let cert_pem = std::fs::read(cert_pem_file)?;
+        let cert = X509::from_pem(&cert_pem)?;
+        Ok(Self {
+            x509: cert,
+            pkey: None,
         })
     }
 }
@@ -883,6 +904,47 @@ IQ==
             result.is_ok(),
             "Failed to load cert and key: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn load_cert_reads_cert_without_key() {
+        use std::io::Write;
+        // Setup: a self-signed cert written to a temp PEM file.
+        let cert = CertBuilder::new()
+            .common_name("load-cert-test")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&cert.x509.to_pem().unwrap()).unwrap();
+
+        // Invoke.
+        let loaded = Certificate::load_cert(file.path()).unwrap();
+
+        // Expect: no private key, and the subject survived the round-trip.
+        assert!(
+            loaded.pkey.is_none(),
+            "load_cert must not carry a private key"
+        );
+        assert_eq!(
+            loaded
+                .x509
+                .subject_name()
+                .try_cmp(cert.x509.subject_name())
+                .unwrap(),
+            std::cmp::Ordering::Equal,
+        );
+    }
+
+    #[test]
+    fn load_cert_missing_file_errors() {
+        let err = Certificate::load_cert("/no/such/file/here.pem")
+            .err()
+            .expect("msg");
+        assert!(
+            err.to_string().contains("No such file or directory"),
+            "No such file or directory, got: {err}"
         );
     }
 }
