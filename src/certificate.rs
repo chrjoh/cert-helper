@@ -28,8 +28,8 @@ use openssl::x509::{
 pub use policy::CertificatePolicy;
 use policy::append_certificate_policies;
 use std::collections::{HashMap, HashSet};
-
 use std::marker::PhantomData;
+use std::net::IpAddr;
 use std::path::Path;
 pub use usage::Usage;
 use usage::get_key_usage;
@@ -269,7 +269,10 @@ impl<P> CertBuilder<P> {
             serial.to_asn1_integer()?
         };
 
-        let pkey = select_key(&self.fields.key_type).unwrap();
+        let pkey = match &self.fields.existing_key {
+            Some(pkey) => pkey.clone(),
+            None => select_key(&self.fields.key_type)?,
+        };
         builder.set_serial_number(&serial_number)?;
         builder.set_subject_name(&name)?;
         builder.set_pubkey(&pkey)?;
@@ -304,7 +307,7 @@ impl<P> CertBuilder<P> {
 
         let mut san = SubjectAlternativeName::new();
         for s in &self.fields.alternative_names {
-            san.dns(s);
+            add_san_entry(&mut san, s);
         }
         if let Some(signer_cert) = signer {
             builder.append_extension(
@@ -541,6 +544,13 @@ pub fn create_cert_chain_from_cert_list(
     Ok(longest_chain)
 }
 
+fn add_san_entry(san: &mut SubjectAlternativeName, value: &str) {
+    match value.parse::<IpAddr>() {
+        Ok(ip) => san.ip(&ip.to_string()),
+        Err(_) => san.dns(value),
+    };
+}
+
 fn enforce_path_len(
     is_ca: bool,
     path_len: Option<u32>,
@@ -646,6 +656,7 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use tempfile::NamedTempFile;
+    use x509_parser::extensions::GeneralName;
 
     #[test]
     fn create_ca_with_path_len_set() {
@@ -666,6 +677,106 @@ mod tests {
             .build_and_self_sign()
             .unwrap();
         assert_eq!(ca.x509.pathlen(), None);
+    }
+
+    #[test]
+    fn key_usage_is_marked_critical() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        let leaf = CertBuilder::new()
+            .common_name("leaf")
+            .key_usage([Usage::certsign].into_iter().collect())
+            .build_and_sign(&ca)
+            .unwrap();
+        let der = leaf.x509.to_der().unwrap();
+        let (_, parsed) = parse_x509_certificate(&der).unwrap();
+
+        let ku = parsed
+            .tbs_certificate
+            .extensions()
+            .iter()
+            .find(|ext| matches!(ext.parsed_extension(), ParsedExtension::KeyUsage(_)))
+            .expect("certificate should carry a KeyUsage extension");
+
+        assert!(ku.critical, "KeyUsage must be critical (RFC 5280 §4.2.1.3)");
+    }
+
+    #[test]
+    fn extended_key_usage_is_not_marked_critical() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        let leaf = CertBuilder::new()
+            .common_name("leaf")
+            .key_usage([Usage::serverauth].into_iter().collect())
+            .build_and_sign(&ca)
+            .unwrap();
+        let der = leaf.x509.to_der().unwrap();
+        let (_, parsed) = parse_x509_certificate(&der).unwrap();
+
+        let eku = parsed
+            .tbs_certificate
+            .extensions()
+            .iter()
+            .find(|ext| matches!(ext.parsed_extension(), ParsedExtension::ExtendedKeyUsage(_)))
+            .expect("certificate should carry a ExtendedKeyUsage extension");
+
+        assert!(!eku.critical, "Extened KeyUsage not critical by default");
+    }
+
+    #[test]
+    fn san_names_should_be_added_correctly() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        let leaf = CertBuilder::new()
+            .common_name("leaf")
+            .alternative_names(vec!["localhost", "127.0.0.1", "::1"])
+            .key_usage([Usage::serverauth].into_iter().collect())
+            .build_and_sign(&ca)
+            .unwrap();
+        let der = leaf.x509.to_der().unwrap();
+        let (_, parsed) = parse_x509_certificate(&der).unwrap();
+        let san = parsed
+            .subject_alternative_name()
+            .unwrap()
+            .expect("leaf should carry a SubjectAltName extension");
+
+        let mut dns: Vec<&str> = Vec::new();
+        let mut ips: Vec<IpAddr> = Vec::new();
+        for gn in &san.value.general_names {
+            match gn {
+                GeneralName::DNSName(name) => dns.push(name),
+                GeneralName::IPAddress(bytes) => ips.push(match bytes.len() {
+                    4 => IpAddr::from(<[u8; 4]>::try_from(*bytes).unwrap()),
+                    16 => IpAddr::from(<[u8; 16]>::try_from(*bytes).unwrap()),
+                    n => panic!("iPAddress SAN must be 4 or 16 octets, got {n}"),
+                }),
+                other => panic!("unexpected GeneralName in SAN: {other:?}"),
+            }
+        }
+
+        // `alternative_names` is a HashSet — sort before comparing or this flakes.
+        dns.sort_unstable();
+        ips.sort_unstable();
+
+        // The CN is copied into the SAN list, so "leaf" appears alongside the
+        // explicitly requested names.
+        assert_eq!(dns, ["leaf", "localhost"]);
+        assert_eq!(
+            ips,
+            [
+                "127.0.0.1".parse::<IpAddr>().unwrap(),
+                "::1".parse::<IpAddr>().unwrap()
+            ]
+        )
     }
 
     #[test]
@@ -847,6 +958,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ensure_that_supplied_private_key_is_used() {
+        let ca_one = CertBuilder::new()
+            .common_name("My Test Ca1")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        let ca_two = CertBuilder::new()
+            .common_name("My Test Ca2")
+            .is_ca(true)
+            .private_key(ca_one.pkey.unwrap())
+            .build_and_self_sign()
+            .unwrap();
+        assert_eq!(
+            ca_one
+                .x509
+                .public_key()
+                .unwrap()
+                .public_key_to_der()
+                .unwrap(),
+            ca_two
+                .x509
+                .public_key()
+                .unwrap()
+                .public_key_to_der()
+                .unwrap()
+        )
+    }
     #[test]
     fn save_certificate() {
         let ca = CertBuilder::new().common_name("My Test Ca").is_ca(true);

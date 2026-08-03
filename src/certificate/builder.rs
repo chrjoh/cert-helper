@@ -1,6 +1,7 @@
 use super::key::KeyType;
 use super::usage::Usage;
 use openssl::hash::MessageDigest;
+use openssl::pkey::{PKey, Private};
 use std::collections::HashSet;
 
 macro_rules! vec_str_to_hs {
@@ -36,6 +37,7 @@ pub trait BuilderCommon {
     fn set_key_type(&mut self, key_type: KeyType);
     fn set_signature_alg(&mut self, signature_alg: HashAlg);
     fn set_key_usage(&mut self, key_usage: HashSet<Usage>);
+    fn set_private_key(&mut self, pkey: PKey<Private>);
 }
 
 /// Stores common configurable fields used during X509 certificate or CSR generation.
@@ -50,6 +52,7 @@ pub struct BuilderFields {
     pub(crate) organization: String,
     pub(crate) locality_time: String,
     pub(crate) key_type: Option<KeyType>,
+    pub(crate) existing_key: Option<PKey<Private>>,
     pub(crate) signature_alg: Option<HashAlg>,
     pub(crate) usage: Option<HashSet<Usage>>,
 }
@@ -96,7 +99,10 @@ impl BuilderCommon for BuilderFields {
     fn set_signature_alg(&mut self, signature_alg: HashAlg) {
         self.signature_alg = Some(signature_alg);
     }
-
+    // Sets a private key to be used
+    fn set_private_key(&mut self, pkey: PKey<Private>) {
+        self.existing_key = Some(pkey);
+    }
     // Set what the certificate are allowed to do, KeyUsage and ExtendeKeyUsage
     fn set_key_usage(&mut self, key_usage: HashSet<Usage>) {
         match &mut self.usage {
@@ -124,6 +130,7 @@ impl Default for BuilderFields {
             key_type: Default::default(),
             signature_alg: Default::default(),
             usage: Default::default(),
+            existing_key: Default::default(),
         }
     }
 }
@@ -174,6 +181,24 @@ pub trait UseesBuilderFields: Sized {
     /// Sets the type of key to generate (e.g., RSA or Elliptic Curve).
     fn key_type(mut self, key_type: KeyType) -> Self {
         self.fields_mut().set_key_type(key_type);
+        self
+    }
+    /// Use a private key you already hold instead of generating a new one.
+    ///
+    /// This takes precedence over [`key_type`](Self::key_type): if both are set
+    /// the supplied key wins and the requested key type is ignored, since the
+    /// algorithm is a property of the key itself.
+    ///
+    /// Useful for re-issuing a certificate against an existing key (so deployed
+    /// configuration and any pinning keep working), and for minting many
+    /// certificates cheaply — key generation, not signing, is the expensive part
+    /// of issuance.
+    ///
+    /// Reusing one key across certificates is a deliberate trade-off: a
+    /// compromise of that key affects every certificate issued from it. Prefer a
+    /// fresh key per certificate unless you have a specific reason not to.
+    fn private_key(mut self, pkey: PKey<Private>) -> Self {
+        self.fields_mut().set_private_key(pkey);
         self
     }
     /// Sets the signature algorithm to use when signing the certificate.

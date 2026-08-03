@@ -1,6 +1,44 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [Unreleased]
+
+### Added
+- `private_key` on the certificate and CSR builders — use a private key you
+  already hold instead of generating a new one. Takes precedence over
+  `key_type`, since the algorithm is a property of the key. Useful for
+  re-issuing against an existing key, and for minting many certificates cheaply
+  (key generation, not signing, dominates issuance cost).
+- Subject alternative names now support `iPAddress`. An entry in
+  `alternative_names` that parses as an IPv4 or IPv6 address is emitted as an
+  `iPAddress` SAN instead of a `dNSName`, so certificates for IP literals are
+  now accepted by clients that previously rejected them.
+- When issuing from a CSR, `rfc822Name`, `uniformResourceIdentifier` and
+  `registeredID` subject alternative names are carried across to the issued
+  certificate. Previously only `dNSName` was.
+
+### Fixed
+- **Private keys are no longer written world-readable.** `save()` used
+  `File::create`, leaving the key at the process umask default — typically
+  `0644`. The key is now created with mode `0600` on Unix, applied at creation
+  rather than afterwards so there is no window in which it is readable. Saving
+  over an existing key file also tightens it, so a key written by an earlier
+  version is corrected the next time it is saved. Note that a key never saved
+  again keeps its old permissions — check any existing key directories.
+- The `KeyUsage` extension is now marked critical, as RFC 5280 §4.2.1.3 says
+  conforming CAs SHOULD. `ExtendedKeyUsage` is deliberately left non-critical.
+- Key generation failures return an error instead of panicking. The two
+  `select_key(..).unwrap()` call sites now propagate with `?`.
+
+### Changed
+- **Signing a CSR now fails if it carries a subject alternative name this crate
+  cannot reproduce** (`directoryName`, `otherName`, `x400Address`,
+  `ediPartyName`), rather than silently dropping it. Previously such a CSR would
+  be signed and the requester would receive a certificate quietly missing an
+  identity they asked for. A malformed `iPAddress` — one that is neither 4 nor
+  16 octets — is likewise rejected rather than skipped.
+
 ## [0.4.9] - 2026-07-28
 
 ### Added

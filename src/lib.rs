@@ -298,19 +298,35 @@
 //! assert!(is_revoked);
 //! ```
 //!
+//! ## Writing to file
+//!
+//! `save(path, filename)` comes from the `X509Common` trait and writes two files:
+//! the certificate (or CSR) as `<filename>_cert.pem` / `<filename>_csr.pem`, and
+//! the private key as `<filename>_pkey.pem`.
+//!
+//! On Unix the private key is created with mode `0600` and the certificate with
+//! `0644`. The mode is applied when the file is created rather than set
+//! afterwards, so the key is never briefly readable by others. Saving over an
+//! existing file replaces it rather than truncating in place, which means a key
+//! written by an older version of this crate — when keys were left at the umask
+//! default — is tightened to `0600` the next time it is saved.
+//!
+//! On non-Unix targets no permission guarantee is made.
+//!
 //! ## Config
 //!
 //! Values that can be selected for building a certificate
 //! | keyword | description | options |
 //! | ----------------- | --------------------------------------------------------------------------- | ----------------------------------- |
 //! | common_name | the common name this certificate shoud have, mandatory field | string: www.foo.se |
-//! | key_type  | key type to be used, defaults to RSA2048 | enum: RSA2048, RSA4096, P224, P256, P384, P521, Ed25519, and with `--features pqc`: MlDsa44, MlDsa65, MlDsa87, SlhDsaSha2_128s, SlhDsaSha2_192s, SlhDsaSha2_256s |
+//! | key_type  | key type to generate, defaults to RSA2048. Ignored when `private_key` is set | enum: RSA2048, RSA4096, P224, P256, P384, P521, Ed25519, and with `--features pqc`: MlDsa44, MlDsa65, MlDsa87, SlhDsaSha2_128s, SlhDsaSha2_192s, SlhDsaSha2_256s |
+//! | private_key | use a private key you already hold instead of generating a new one. Takes precedence over `key_type` | `PKey<Private>` |
 //! | ca | is this certificate used to sign other certificates, default value is false | boolean: true or false |
 //! | country_name | the country code to use,must follow the standard defined by ISO 3166-1 alpha-2. | string: SE |
 //! | organization | organisation name | string: test |
 //! | state_province | some name | string: test |
 //! | locality_time | Stockholm | string: Stockholm |
-//! | alternative_names | list of alternative DNS names this certificate is valid for | string: valid dns names |
+//! | alternative_names | alternative names this certificate is valid for. An entry that parses as an IP address is emitted as an `iPAddress` SAN, everything else as `dNSName` | string: dns names or IP literals |
 //! | signature_alg | which algorithm to be used for signature, default is SHA256 | enum: SHA1, SHA256, SHA384, SHA512 |
 //! | valid_from | Start date then the certificate is valid, default is now | string: 2010-01-01 |
 //! | valid_to | End date then the certificate is not valid, default is 1 year | string: 2020-01-01 |
