@@ -1,4 +1,3 @@
-use super::add_san_entry;
 use super::builder::{BuilderFields, UseesBuilderFields, select_hash};
 use super::common::{X509Common, X509Parts, create_asn1_time_from_date};
 use super::enforce_path_len;
@@ -12,6 +11,7 @@ use super::usage::get_key_usage;
 #[cfg(feature = "pqc")]
 use super::usage::validate_pqc_key_usage;
 use super::{Certificate, CertificatePolicy, Usage, ca_basic_constraints, can_sign_cert};
+use super::{add_san_entry, san_names};
 use openssl::asn1::{Asn1Object, Asn1OctetString, Asn1Time};
 use openssl::bn::BigNum;
 use openssl::hash::{MessageDigest, hash};
@@ -474,11 +474,17 @@ impl CsrBuilder {
             extensions.push(tracked_extended_key_usage.into_inner().build()?)?;
         }
 
-        let mut san = SubjectAlternativeName::new();
-        for s in &self.fields.alternative_names {
-            add_san_entry(&mut san, s);
+        // A CSR is a request for an end-entity certificate, so the common name
+        // belongs in the SAN — RFC 6125 verifiers match on SAN and ignore the CN.
+        let names = san_names(&self.fields, true);
+        if !names.is_empty() {
+            // RFC 5280 §4.2.1.6 — never emit an empty SAN
+            let mut san = SubjectAlternativeName::new();
+            for n in &names {
+                add_san_entry(&mut san, n);
+            }
+            extensions.push(san.build(&builder.x509v3_context(None))?)?;
         }
-        extensions.push(san.build(&builder.x509v3_context(None))?)?;
 
         builder.add_extensions(&extensions)?;
         let csr: X509Req = if is_digestless_key(&pkey) {
@@ -755,6 +761,68 @@ mod tests {
             "expected a proof-of-possession error, got: {err}"
         );
     }
+
+    /// The DNS names in a CSR's requested SubjectAltName, or `None` when the
+    /// request carries no SAN extension at all.
+    fn csr_san_dns(csr: &Csr) -> Option<Vec<String>> {
+        use x509_parser::certification_request::X509CertificationRequest;
+        use x509_parser::prelude::FromDer;
+
+        let der = csr.csr.to_der().unwrap();
+        let (_, parsed) = X509CertificationRequest::from_der(&der).unwrap();
+        parsed.requested_extensions()?.find_map(|ext| match ext {
+            ParsedExtension::SubjectAlternativeName(san) => Some(
+                san.general_names
+                    .iter()
+                    .filter_map(|gn| match gn {
+                        GeneralName::DNSName(n) => Some((*n).to_string()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn csr_common_name_is_included_in_the_san() {
+        let csr = CsrBuilder::new()
+            .common_name("leaf.example.com")
+            .certificate_signing_request()
+            .unwrap();
+
+        assert_eq!(
+            csr_san_dns(&csr).expect("a CSR with a common name should request a SAN"),
+            ["leaf.example.com"]
+        );
+    }
+
+    #[test]
+    fn csr_common_name_listed_in_alternative_names_is_not_duplicated() {
+        let csr = CsrBuilder::new()
+            .common_name("example.com")
+            .alternative_names(vec!["example.com", "www.example.com"])
+            .certificate_signing_request()
+            .unwrap();
+
+        let mut dns = csr_san_dns(&csr).expect("CSR should request a SAN");
+        dns.sort();
+        assert_eq!(dns, ["example.com", "www.example.com"]);
+    }
+
+    #[test]
+    fn csr_without_any_names_emits_no_san_extension() {
+        // RFC 5280 §4.2.1.6 — a present SubjectAltName must hold at least one
+        // entry, so with nothing to put in it the extension must be absent
+        // rather than empty.
+        let csr = CsrBuilder::new()
+            .common_name("   ")
+            .certificate_signing_request()
+            .unwrap();
+
+        assert_eq!(csr_san_dns(&csr), None);
+    }
+
     #[test]
     fn ensure_that_supplied_private_key_is_used() {
         let ca = CertBuilder::new()

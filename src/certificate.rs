@@ -305,17 +305,9 @@ impl<P> CertBuilder<P> {
             builder.append_extension(tracked_extended_key_usage.into_inner().build()?)?;
         }
 
-        let mut names: Vec<&str> = self
-            .fields
-            .alternative_names
-            .iter()
-            .map(String::as_str)
-            .collect();
         // A CA is identified by its DN and key id, never by SAN — so don't invent one.
         // End-entity certs get the CN copied in, since RFC 6125 verifiers ignore CN.
-        if !self.ca && !self.fields.common_name.trim().is_empty() {
-            names.push(&self.fields.common_name);
-        }
+        let names = san_names(&self.fields, !self.ca);
         if !names.is_empty() {
             // RFC 5280 §4.2.1.6 — never emit an empty SAN
             let mut san = SubjectAlternativeName::new();
@@ -569,6 +561,35 @@ fn add_san_entry(san: &mut SubjectAlternativeName, value: &str) {
     };
 }
 
+/// The SAN entries for a certificate or signing request: everything the caller
+/// asked for, plus the common name when it belongs there.
+///
+/// `include_cn` is false for CA certificates — a CA is identified by its
+/// distinguished name and key identifier during path validation, so it carries
+/// no SAN at all. It is true for end-entity certificates and for signing
+/// requests, because RFC 6125 verifiers match on the SAN and ignore the CN.
+///
+/// The CN is skipped when the caller already listed it, so a name given both
+/// ways is emitted once rather than twice.
+///
+/// Callers must not emit an extension when this returns an empty list —
+/// RFC 5280 §4.2.1.6 requires a present SubjectAltName to hold at least one
+/// entry.
+pub(crate) fn san_names(fields: &BuilderFields, include_cn: bool) -> Vec<&str> {
+    let mut names: Vec<&str> = fields
+        .alternative_names
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if include_cn
+        && !fields.common_name.trim().is_empty()
+        && !fields.alternative_names.contains(&fields.common_name)
+    {
+        names.push(&fields.common_name);
+    }
+    names
+}
+
 fn enforce_path_len(
     is_ca: bool,
     path_len: Option<u32>,
@@ -795,6 +816,42 @@ mod tests {
                 "::1".parse::<IpAddr>().unwrap()
             ]
         )
+    }
+
+    #[test]
+    fn common_name_listed_in_alternative_names_is_not_duplicated() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        // The CN is also given explicitly — it must still appear exactly once.
+        let leaf = CertBuilder::new()
+            .common_name("example.com")
+            .alternative_names(vec!["example.com", "www.example.com"])
+            .key_usage([Usage::serverauth].into_iter().collect())
+            .build_and_sign(&ca)
+            .unwrap();
+
+        let der = leaf.x509.to_der().unwrap();
+        let (_, parsed) = parse_x509_certificate(&der).unwrap();
+        let san = parsed
+            .subject_alternative_name()
+            .unwrap()
+            .expect("leaf should carry a SubjectAltName");
+
+        let mut dns: Vec<&str> = san
+            .value
+            .general_names
+            .iter()
+            .filter_map(|gn| match gn {
+                GeneralName::DNSName(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        dns.sort_unstable();
+
+        assert_eq!(dns, ["example.com", "www.example.com"]);
     }
 
     #[test]

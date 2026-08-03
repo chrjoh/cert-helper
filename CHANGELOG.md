@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-08-03
+
+Two regressions from the SubjectAltName rework in 0.5.0. Both are fixes; nothing
+breaks.
+
+### Fixed
+- **A signing request built with only a common name emitted an *empty*
+  SubjectAltName extension.** Before 0.5.0 the CN was inserted into
+  `alternative_names` as it was set, so the CSR path always had at least one
+  name to write. 0.5.0 moved that decision to certificate build time and did not
+  update the CSR path, which left it writing an extension with zero entries —
+  forbidden by RFC 5280 §4.2.1.6 — and silently dropping the common name from
+  the request. The CSR path now includes the CN and omits the extension entirely
+  when there are no names.
+- **A common name also listed in `alternative_names` was emitted twice.** The CN
+  was appended to a list already collected from `alternative_names` with no
+  check, so `common_name("example.com")` together with
+  `alternative_names(["example.com"])` produced `DNS:example.com` twice. Harmless
+  to verifiers, but wrong. The CN is now skipped when the caller already listed
+  it.
+
+Both paths now share one `san_names` helper, so certificate and CSR SAN
+assembly cannot drift apart again — which is how these two arose.
+
 ## [0.5.0] - 2026-08-03
 
 Released as `0.5.0` rather than `0.4.10` because of the breaking changes below.
