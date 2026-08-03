@@ -305,14 +305,33 @@ impl<P> CertBuilder<P> {
             builder.append_extension(tracked_extended_key_usage.into_inner().build()?)?;
         }
 
-        let mut san = SubjectAlternativeName::new();
-        for s in &self.fields.alternative_names {
-            add_san_entry(&mut san, s);
+        let mut names: Vec<&str> = self
+            .fields
+            .alternative_names
+            .iter()
+            .map(String::as_str)
+            .collect();
+        // A CA is identified by its DN and key id, never by SAN — so don't invent one.
+        // End-entity certs get the CN copied in, since RFC 6125 verifiers ignore CN.
+        if !self.ca && !self.fields.common_name.trim().is_empty() {
+            names.push(&self.fields.common_name);
         }
+        if !names.is_empty() {
+            // RFC 5280 §4.2.1.6 — never emit an empty SAN
+            let mut san = SubjectAlternativeName::new();
+            for n in &names {
+                add_san_entry(&mut san, n);
+            }
+            if let Some(signer_cert) = signer {
+                builder.append_extension(
+                    san.build(&builder.x509v3_context(Some(&signer_cert.x509), None))?,
+                )?;
+            } else {
+                builder.append_extension(san.build(&builder.x509v3_context(None, None))?)?;
+            }
+        }
+
         if let Some(signer_cert) = signer {
-            builder.append_extension(
-                san.build(&builder.x509v3_context(Some(&signer_cert.x509), None))?,
-            )?;
             if signer_cert.x509.subject_key_id().is_some() {
                 let aki = AuthorityKeyIdentifier::new()
                     .keyid(true)
@@ -322,7 +341,6 @@ impl<P> CertBuilder<P> {
             }
         } else {
             // add aki that is the same as ski for self signed
-            builder.append_extension(san.build(&builder.x509v3_context(None, None))?)?;
             let oid = Asn1Object::from_str("2.5.29.35")?; // OID för Authority Key Identifier (AKI)
             let pubkey_der = pkey.public_key_to_der()?;
             let aki_hash = hash(MessageDigest::sha1(), &pubkey_der)?;

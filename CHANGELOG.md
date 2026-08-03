@@ -2,7 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.5.0] - 2026-08-03
+
+Released as `0.5.0` rather than `0.4.10` because of the breaking changes below.
+Cargo treats the minor version as the compatibility unit for `0.y.z` releases,
+so a `0.4.10` would have been picked up automatically by anyone depending on
+`"0.4"` — including the new CSR error path. This way the upgrade is a choice.
+
+### Breaking
+
+- **`BuilderCommon::set_private_key` is a new required trait method.**
+  `BuilderCommon` is publicly exported, so any implementation of it outside this
+  crate must add the method to compile. Implementors of `UseesBuilderFields` are
+  unaffected — the corresponding `private_key` builder method has a default body.
+- **Signing a CSR now fails if it carries a subject alternative name this crate
+  cannot reproduce** (`directoryName`, `otherName`, `x400Address`,
+  `ediPartyName`), rather than silently dropping it. Previously such a CSR was
+  signed and the requester received a certificate quietly missing an identity
+  they had asked for. A malformed `iPAddress` — neither 4 nor 16 octets — is
+  likewise rejected rather than skipped. Calls that previously succeeded may now
+  return `Err`.
+- **The `KeyUsage` extension is now marked critical**, as RFC 5280 §4.2.1.3 says
+  conforming CAs SHOULD. This changes the meaning of every certificate the crate
+  emits: a verifier must now enforce the key usage bits rather than being free to
+  ignore them, so a certificate used outside its declared usage may start being
+  rejected. `ExtendedKeyUsage` is deliberately left non-critical.
+- **CA certificates no longer carry a SubjectAltName.** The common name used to
+  be copied into `alternative_names` as the CN was set, so every certificate
+  received a SAN whether or not it made sense — a root named `My Test Ca` was
+  issued with `DNS:My Test Ca`, which is not a valid DNS name. The SAN list is
+  now assembled when the certificate is built, and the CN is copied in only for
+  end-entity certificates. CA certificates, root and intermediate alike, get no
+  SAN at all: a CA is identified by its distinguished name and key identifier
+  during path validation, and no verifier consults its SAN.
+
+  Self-signed **leaf** certificates are unaffected and still receive the CN —
+  `CertBuilder::new().common_name("localhost").build_and_self_sign()` continues
+  to produce `DNS:localhost`, which matters because RFC 6125 verifiers ignore the
+  CN and match only against the SAN.
+
+  If a certificate would end up with no names at all, the extension is now
+  omitted rather than emitted empty, which RFC 5280 §4.2.1.6 forbids.
+
+  Code that inspects a CA's SAN will see `None` where it previously saw the CN.
+  Nothing in certificate verification depends on it.
 
 ### Added
 - `private_key` on the certificate and CSR builders — use a private key you
@@ -26,18 +69,8 @@ All notable changes to this project will be documented in this file.
   over an existing key file also tightens it, so a key written by an earlier
   version is corrected the next time it is saved. Note that a key never saved
   again keeps its old permissions — check any existing key directories.
-- The `KeyUsage` extension is now marked critical, as RFC 5280 §4.2.1.3 says
-  conforming CAs SHOULD. `ExtendedKeyUsage` is deliberately left non-critical.
 - Key generation failures return an error instead of panicking. The two
   `select_key(..).unwrap()` call sites now propagate with `?`.
-
-### Changed
-- **Signing a CSR now fails if it carries a subject alternative name this crate
-  cannot reproduce** (`directoryName`, `otherName`, `x400Address`,
-  `ediPartyName`), rather than silently dropping it. Previously such a CSR would
-  be signed and the requester would receive a certificate quietly missing an
-  identity they asked for. A malformed `iPAddress` — one that is neither 4 nor
-  16 octets — is likewise rejected rather than skipped.
 
 ## [0.4.9] - 2026-07-28
 
