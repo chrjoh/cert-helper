@@ -153,10 +153,13 @@ fn test_create_self_signed_certificate() -> Result<(), Box<dyn std::error::Error
         x509.issuer_name().to_der().ok(),
         x509.subject_name().to_der().ok()
     );
-    // Make sure alt names was added
-    let alt_names = &x509.subject_alt_names().unwrap();
-    let dns_value = alt_names.get(0).and_then(|name| name.dnsname());
-    assert_eq!(dns_value, Some("My Test Ca"));
+    // A CA is identified by its DN and key identifier, never by SAN, so no
+    // SubjectAltName is emitted. The CN is not copied in for CA certificates —
+    // "My Test Ca" is not a valid dNSName.
+    assert!(
+        x509.subject_alt_names().is_none(),
+        "a CA certificate should not carry a SubjectAltName"
+    );
 
     let subject = &x509.subject_name();
     let cn = subject.entries_by_nid(Nid::COMMONNAME).next().unwrap();

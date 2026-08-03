@@ -31,10 +31,9 @@ pub(crate) struct TrackedKeyUsage {
 
 impl TrackedKeyUsage {
     fn new() -> Self {
-        Self {
-            inner: KeyUsage::new(),
-            used: false,
-        }
+        let mut inner = KeyUsage::new();
+        inner.critical();
+        Self { inner, used: false }
     }
 
     fn digital_signature(&mut self) {

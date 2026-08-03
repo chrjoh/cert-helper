@@ -1,3 +1,4 @@
+use super::add_san_entry;
 use super::builder::{BuilderFields, UseesBuilderFields, select_hash};
 use super::common::{X509Common, X509Parts, create_asn1_time_from_date};
 use super::enforce_path_len;
@@ -22,9 +23,11 @@ use openssl::x509::extension::{
 };
 use openssl::x509::{X509, X509Builder, X509Extension, X509NameBuilder, X509Req, X509ReqBuilder};
 use std::collections::HashSet;
+use std::error::Error;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use x509_parser::certification_request::X509CertificationRequest;
-use x509_parser::extensions::ParsedExtension;
+use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::prelude::FromDer;
 
 /// Holds the generated Certificate Signing Request (CSR) and its associated private key.
@@ -192,6 +195,7 @@ impl Csr {
                         let mut cert_sign_added = false;
                         let mut crl_sign_added = false;
                         let mut usage = openssl::x509::extension::KeyUsage::new();
+                        usage.critical();
                         if ku.digital_signature() {
                             usage.digital_signature();
                             requested.insert(Usage::signature);
@@ -245,8 +249,51 @@ impl Csr {
                         let mut openssl_san =
                             openssl::x509::extension::SubjectAlternativeName::new();
                         for name in &san.general_names {
-                            if let x509_parser::extensions::GeneralName::DNSName(dns) = name {
-                                openssl_san.dns(dns);
+                            match name {
+                                GeneralName::DNSName(dns) => {
+                                    openssl_san.dns(dns);
+                                }
+                                GeneralName::IPAddress(bytes) => match bytes.len() {
+                                    4 => {
+                                        let octets = <[u8; 4]>::try_from(*bytes)
+                                            .map_err(|_| "unreachable: 4 byte slice")?;
+                                        openssl_san.ip(&Ipv4Addr::from(octets).to_string());
+                                    }
+                                    16 => {
+                                        let octets = <[u8; 16]>::try_from(*bytes)
+                                            .map_err(|_| "unreachable: 16 byte slice")?;
+                                        openssl_san.ip(&Ipv6Addr::from(octets).to_string());
+                                    }
+                                    len => {
+                                        return Err(format!(
+                                            "CSR contains a malformed iPAddress SubjectAltName: \
+                                             expected 4 or 16 octets, got {len}"
+                                        )
+                                        .into());
+                                    }
+                                },
+                                GeneralName::RFC822Name(email) => {
+                                    openssl_san.email(email);
+                                }
+                                GeneralName::URI(uri) => {
+                                    openssl_san.uri(uri);
+                                }
+                                GeneralName::RegisteredID(oid) => {
+                                    openssl_san.rid(&oid.to_id_string());
+                                }
+
+                                GeneralName::DirectoryName(_) => {
+                                    return Err(unsupported_san("directoryName"));
+                                }
+                                GeneralName::OtherName(..) => {
+                                    return Err(unsupported_san("otherName"));
+                                }
+                                GeneralName::X400Address(_) => {
+                                    return Err(unsupported_san("x400Address"));
+                                }
+                                GeneralName::EDIPartyName(_) => {
+                                    return Err(unsupported_san("ediPartyName"));
+                                }
                             }
                         }
                         builder.append_extension(
@@ -266,7 +313,12 @@ impl Csr {
             let result = ca_basic_constraints(options.path_len)?;
             builder.append_extension(result)?;
             if !any_key_used {
-                let key_usage = KeyUsage::new().key_cert_sign().crl_sign().build().unwrap();
+                let key_usage = KeyUsage::new()
+                    .critical()
+                    .key_cert_sign()
+                    .crl_sign()
+                    .build()
+                    .unwrap();
                 builder.append_extension(key_usage)?;
             }
         } else {
@@ -389,7 +441,10 @@ impl CsrBuilder {
         let mut builder = X509ReqBuilder::new()?;
         builder.set_version(0)?;
         builder.set_subject_name(&name)?;
-        let pkey = select_key(&self.fields.key_type).unwrap();
+        let pkey = match &self.fields.existing_key {
+            Some(pkey) => pkey.clone(),
+            None => select_key(&self.fields.key_type)?,
+        };
         builder.set_pubkey(&pkey)?;
         let key_usage = self.fields.usage.clone().unwrap_or_default();
 
@@ -421,7 +476,7 @@ impl CsrBuilder {
 
         let mut san = SubjectAlternativeName::new();
         for s in &self.fields.alternative_names {
-            san.dns(s);
+            add_san_entry(&mut san, s);
         }
         extensions.push(san.build(&builder.x509v3_context(None))?)?;
 
@@ -460,6 +515,10 @@ fn verify_csr_proof_of_possession(csr: &X509Req) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+fn unsupported_san(kind: &str) -> Box<dyn Error> {
+    format!("CSR contains a SubjectAltName type this crate cannot reproduce: {kind}").into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +527,7 @@ mod tests {
     use crate::certificate::key::generate_pqc_key;
     #[cfg(feature = "pqc")]
     use crate::certificate::key::sign_x509_req_digestless;
+    use openssl::ec::{EcGroup, EcKey};
     use openssl::x509::X509Req;
     #[cfg(feature = "pqc")]
     use openssl::x509::X509ReqBuilder;
@@ -695,6 +755,45 @@ mod tests {
             "expected a proof-of-possession error, got: {err}"
         );
     }
+    #[test]
+    fn ensure_that_supplied_private_key_is_used() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        let csr = CsrBuilder::new()
+            .common_name("leaf")
+            .private_key(ca.pkey.clone().unwrap())
+            .certificate_signing_request()
+            .unwrap();
+        let cert = csr
+            .build_signed_certificate(
+                &ca,
+                CsrOptions::new().is_ca(true), // unlimited → any m ok
+            )
+            .unwrap();
+        assert_eq!(
+            ca.x509.public_key().unwrap().public_key_to_der().unwrap(),
+            cert.x509.public_key().unwrap().public_key_to_der().unwrap()
+        )
+    }
+    #[test]
+    fn san_directory_name_should_give_an_error() {
+        let ca = CertBuilder::new()
+            .common_name("My Test Ca")
+            .is_ca(true)
+            .build_and_self_sign()
+            .unwrap();
+        let bad_csr = csr_with_directory_name_san();
+        let err = bad_csr
+            .build_signed_certificate(&ca, CsrOptions::new())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("directoryName"),
+            "expected error for san with directory name"
+        )
+    }
 
     #[cfg(feature = "pqc")]
     #[test]
@@ -711,8 +810,14 @@ mod tests {
             .set_pubkey(&pkey)
             .expect("failed to set public key in csr");
         let mut exts = Stack::new().unwrap();
-        exts.push(KeyUsage::new().key_encipherment().build().unwrap())
-            .unwrap();
+        exts.push(
+            KeyUsage::new()
+                .critical()
+                .key_encipherment()
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         builder.set_version(0).unwrap();
         builder.add_extensions(&exts).unwrap();
         let req = builder.build();
@@ -755,5 +860,38 @@ jcGV3++2wS4LN4h3CG4pWZ+LTXhm8ymhoWOapN95lfe3xLRAKFJwiLkGwS75++FW
         csr_file.write_all(csr_data).expect("Failed to write csr");
         let result = Csr::load_csr(csr_file.path());
         assert!(result.is_ok(), "Failed to load csr: {:?}", result.err());
+    }
+
+    fn csr_with_directory_name_san() -> Csr {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let pkey = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+
+        let mut req = X509ReqBuilder::new().unwrap();
+        req.set_version(0).unwrap();
+
+        let mut subject = X509NameBuilder::new().unwrap();
+        subject.append_entry_by_text("CN", "leaf").unwrap();
+        req.set_subject_name(&subject.build()).unwrap();
+        req.set_pubkey(&pkey).unwrap();
+
+        let mut dir = X509NameBuilder::new().unwrap();
+        dir.append_entry_by_text("CN", "some directory name")
+            .unwrap();
+        let dir = dir.build();
+
+        let mut san = SubjectAlternativeName::new();
+        san.dir_name2(dir); // NOT dir_name — see below
+        let ext = san.build(&req.x509v3_context(None)).unwrap();
+
+        let mut exts = Stack::new().unwrap();
+        exts.push(ext).unwrap();
+        req.add_extensions(&exts).unwrap();
+
+        req.sign(&pkey, MessageDigest::sha256()).unwrap(); // required — see below
+
+        Csr {
+            csr: req.build(),
+            pkey: Some(pkey),
+        }
     }
 }

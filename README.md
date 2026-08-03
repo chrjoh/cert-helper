@@ -288,25 +288,58 @@ let is_revoked = wrapper.revoked(revocked.x509.serial_number());
  assert!(is_revoked);
 ```
 
+## Writing to file
+
+`save(path, filename)` comes from the `X509Common` trait and writes two files:
+the certificate (or CSR) as `<filename>_cert.pem` / `<filename>_csr.pem`, and the
+private key as `<filename>_pkey.pem`.
+
+On Unix the private key is created with mode `0600` and the certificate with
+`0644`. The mode is applied when the file is created rather than set afterwards,
+so the key is never briefly readable by others. Saving over an existing file
+replaces it rather than truncating in place, which means a key written by an
+older version of this crate — when keys were left at the umask default — is
+tightened to `0600` the next time it is saved.
+
+On non-Unix targets no permission guarantee is made.
+
 ## Config
 
 Values that can be selected for building a certificate
 | keyword | description | options |
 | ----------------- | --------------------------------------------------------------------------- | ----------------------------------- |
-| common_name | the common name this certificate shoud have, mandatory field | string: www.foo.se |
-| key_type | key type to be used, defaults to RSA2048 | enum: RSA2048, RSA4096, P224, P256, P384, P521, Ed25519, and with `--features pqc`: MlDsa44, MlDsa65, MlDsa87, SlhDsaSha2_128s, SlhDsaSha2_192s, SlhDsaSha2_256s |
-| ca | is this certificate used to sign other certificates, default value is false | boolean: true or false |
+| common_name | the common name this certificate shoud have, mandatory field. Also added to the SAN of end-entity certificates | string: www.foo.se |
+| key_type | key type to generate, defaults to RSA2048. Ignored when `private_key` is set | enum: RSA2048, RSA4096, P224, P256, P384, P521, Ed25519, and with `--features pqc`: MlDsa44, MlDsa65, MlDsa87, SlhDsaSha2_128s, SlhDsaSha2_192s, SlhDsaSha2_256s |
+| private_key | use a private key you already hold instead of generating a new one. Takes precedence over `key_type` | `PKey<Private>` |
+| ca | is this certificate used to sign other certificates, default value is false. CA certificates are issued without a SAN | boolean: true or false |
 | country_name | the country code to use,must follow the standard defined by ISO 3166-1 alpha-2. | string: SE |
 | organization | organisation name | string: test |
 | state_province | some name | string: test |
 | locality_time | Stockholm | string: Stockholm |
-| alternative_names | list of alternative DNS names this certificate is valid for | string: valid dns names |
+| alternative_names | alternative names this certificate is valid for, see [Subject alternative names](#subject-alternative-names) below | string: dns names or IP literals |
 | signature_alg | which algorithm to be used for signature, default is SHA256 | enum: SHA1, SHA256, SHA384, SHA512 |
 | valid_from | Start date then the certificate is valid, default is now | string: 2010-01-01 |
 | valid_to | End date then the certificate is not valid, default is 1 year | string: 2020-01-01 |
 | usage | Key usage to add to the certificates, see list below for options | list of enums, defined in Key Usage table |
 | certificate_policy | optional certificate policies to add | AnyPolicy, DomainValidation, OrganizationValidated, IndividualValidated, ExtendedValidation|
 | pathlen | optional CA path length: max intermediate CAs allowed below this cert (only applies when ca is true) | u32: 0, 1, 2 … |
+
+### Subject alternative names
+
+The SAN list is assembled when the certificate is built, from `alternative_names`
+plus — for end-entity certificates only — the common name.
+
+- An entry that parses as an IPv4 or IPv6 address becomes an `iPAddress` name;
+  everything else becomes a `dNSName`.
+- End-entity certificates get the common name added automatically. RFC 6125
+  verifiers match the hostname against the SAN and ignore the CN, so a
+  certificate for `localhost` needs `DNS:localhost` to be usable at all.
+- **CA certificates get no SAN**, root and intermediate alike. A CA is identified
+  during path validation by its distinguished name and key identifier, and no
+  verifier consults its SAN. Setting `ca` to true therefore suppresses the
+  extension, including the automatic CN entry.
+- If there would be no names at all the extension is omitted rather than written
+  empty, which RFC 5280 §4.2.1.6 forbids.
 
 ### Key usage
 
