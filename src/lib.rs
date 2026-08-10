@@ -367,3 +367,5 @@
 
 pub mod certificate;
 pub mod crl;
+#[cfg(test)]
+mod test_der;

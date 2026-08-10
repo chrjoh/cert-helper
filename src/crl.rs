@@ -396,10 +396,10 @@ impl X509CrlBuilder {
                 });
 
                 // thisUpdate and nextUpdate
-                write_generalized_time(writer.next(), &self.this_update);
+                write_time(writer.next(), &self.this_update);
 
                 if let Some(ref next_update) = self.next_update {
-                    write_generalized_time(writer.next(), next_update);
+                    write_time(writer.next(), next_update);
                 }
 
                 // Revoked Certificates
@@ -409,7 +409,7 @@ impl X509CrlBuilder {
                             writer
                                 .next()
                                 .write_bigint_bytes(&revoked.serial.to_bytes_be(), true);
-                            write_generalized_time(writer.next(), &revoked.revocation_date);
+                            write_time(writer.next(), &revoked.revocation_date);
 
                             if !revoked.reasons.is_empty() {
                                 writer.next().write_sequence_of(|writer| {
@@ -684,11 +684,33 @@ pub fn write_der_crl_as_pem<P: AsRef<Path>, F: AsRef<Path>>(
     Ok(())
 }
 
-fn write_generalized_time(writer: yasna::DERWriter, time: &chrono::DateTime<chrono::Utc>) {
-    let time_str = time.format("%Y%m%d%H%M%SZ").to_string();
-    writer.write_tagged_implicit(TAG_GENERALIZEDTIME, |writer| {
-        writer.write_bytes(time_str.as_bytes());
-    });
+/// The first year that must be encoded as `GeneralizedTime` (RFC 5280 §4.1.2.5.1).
+const GENERALIZED_TIME_FROM_YEAR: i32 = 2050;
+
+/// Writes an ASN.1 time as RFC 5280 §5.1.2.4 requires: `UTCTime` through 2049,
+/// `GeneralizedTime` from 2050.
+///
+/// The tag and the year width must be chosen together — `UTCTime` is
+/// `YYMMDDHHMMSSZ` and `GeneralizedTime` is `YYYYMMDDHHMMSSZ` — so writing one
+/// tag with the other's format produces a certificate revocation list that
+/// strict parsers reject.
+///
+/// Unlike the certificate path, this cannot delegate to OpenSSL: the CRL is
+/// DER-encoded directly with `yasna` and never builds an `ASN1_TIME`.
+fn write_time(writer: yasna::DERWriter, time: &chrono::DateTime<chrono::Utc>) {
+    use chrono::Datelike;
+
+    if time.year() < GENERALIZED_TIME_FROM_YEAR {
+        let time_str = time.format("%y%m%d%H%M%SZ").to_string();
+        writer.write_tagged_implicit(TAG_UTCTIME, |writer| {
+            writer.write_bytes(time_str.as_bytes());
+        });
+    } else {
+        let time_str = time.format("%Y%m%d%H%M%SZ").to_string();
+        writer.write_tagged_implicit(TAG_GENERALIZEDTIME, |writer| {
+            writer.write_bytes(time_str.as_bytes());
+        });
+    }
 }
 
 fn read_time(reader: yasna::BERReader) -> Result<DateTime<Utc>, Box<dyn std::error::Error>> {
@@ -696,6 +718,25 @@ fn read_time(reader: yasna::BERReader) -> Result<DateTime<Utc>, Box<dyn std::err
         let bytes = reader.read_bytes()?;
         let s = std::str::from_utf8(&bytes).map_err(|_| ASN1Error::new(ASN1ErrorKind::Invalid))?;
         let naive = NaiveDateTime::parse_from_str(s, format)
+            .map_err(|_| ASN1Error::new(ASN1ErrorKind::Invalid))?;
+        Ok(Utc.from_utc_datetime(&naive))
+    };
+
+    // UTCTime carries a two-digit year, and RFC 5280 §4.1.2.5.1 fixes its
+    // century: 00-49 is 2000-2049, 50-99 is 1950-1999. chrono's `%y` uses a
+    // different pivot (00-68 -> 2000-2068), so it reads "50" as 2050 where the
+    // profile says 1950. Expand the year ourselves and parse with `%Y`.
+    let parse_utc_time = |reader: yasna::BERReader| -> Result<DateTime<Utc>, ASN1Error> {
+        let bytes = reader.read_bytes()?;
+        let s = std::str::from_utf8(&bytes).map_err(|_| ASN1Error::new(ASN1ErrorKind::Invalid))?;
+        let (yy, rest) = s
+            .split_at_checked(2)
+            .ok_or_else(|| ASN1Error::new(ASN1ErrorKind::Invalid))?;
+        let yy: i32 = yy
+            .parse()
+            .map_err(|_| ASN1Error::new(ASN1ErrorKind::Invalid))?;
+        let year = if yy <= 49 { 2000 + yy } else { 1900 + yy };
+        let naive = NaiveDateTime::parse_from_str(&format!("{year}{rest}"), "%Y%m%d%H%M%SZ")
             .map_err(|_| ASN1Error::new(ASN1ErrorKind::Invalid))?;
         Ok(Utc.from_utc_datetime(&naive))
     };
@@ -709,7 +750,7 @@ fn read_time(reader: yasna::BERReader) -> Result<DateTime<Utc>, Box<dyn std::err
             .read_tagged_implicit(TAG_GENERALIZEDTIME, |r| parse_time(r, "%Y%m%d%H%M%SZ"))
             .map_err(|e| format!("Failed to read GeneralizedTime: {:?}", e).into()),
         TAG_UTCTIME => reader
-            .read_tagged_implicit(TAG_UTCTIME, |r| parse_time(r, "%y%m%d%H%M%SZ"))
+            .read_tagged_implicit(TAG_UTCTIME, parse_utc_time)
             .map_err(|e| format!("Failed to read UTCTime: {:?}", e).into()),
         _ => Err("Invalid ASN.1 time format".into()),
     }
@@ -823,6 +864,107 @@ mod tests {
         let cert = dummy_certificate();
         let builder = X509CrlBuilder::new(cert);
         assert_eq!(builder.revoked.len(), 0);
+    }
+
+    mod asn1_time_encoding {
+        use super::*;
+        use crate::test_der::{self, der_times};
+        use chrono::Datelike;
+
+        /// A CRL whose three time fields — thisUpdate, nextUpdate and one
+        /// revocationDate — all sit in the given year.
+        fn crl_in_year(year: i32) -> Vec<u8> {
+            let at = Utc
+                .with_ymd_and_hms(year, 6, 1, 12, 0, 0)
+                .single()
+                .expect("valid timestamp");
+            X509CrlBuilder {
+                signer: dummy_certificate(),
+                this_update: at,
+                next_update: Some(at + Duration::days(30)),
+                revoked: vec![RevokedCert {
+                    serial: BigUint::from(123u32),
+                    revocation_date: at,
+                    reasons: vec![CrlReason::KeyCompromise],
+                }],
+            }
+            .build_and_sign()
+            .unwrap()
+            .to_der()
+            .unwrap()
+        }
+
+        #[test]
+        fn dates_before_2050_are_utctime() {
+            let times = der_times(&crl_in_year(2026));
+
+            // thisUpdate, nextUpdate, revocationDate
+            assert_eq!(times.len(), 3, "expected three time fields, got {times:?}");
+            for t in &times {
+                assert_eq!(t.tag, test_der::TAG_UTCTIME, "{t:?}");
+            }
+            assert_eq!(times[0].value, "260601120000Z");
+            assert_eq!(times[1].value, "260701120000Z");
+        }
+
+        #[test]
+        fn dates_from_2050_are_generalizedtime() {
+            let times = der_times(&crl_in_year(2050));
+
+            assert_eq!(times.len(), 3, "expected three time fields, got {times:?}");
+            for t in &times {
+                assert_eq!(t.tag, test_der::TAG_GENERALIZEDTIME, "{t:?}");
+            }
+            assert_eq!(times[0].value, "20500601120000Z");
+        }
+
+        #[test]
+        fn utctime_round_trips_through_from_der() {
+            // The writer emits UTCTime now, so the reader's century arithmetic is
+            // on the round-trip path for the first time.
+            let der = crl_in_year(2026);
+            let parsed = X509CrlBuilder::from_der(&der, dummy_certificate()).unwrap();
+            let expected = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).single().unwrap();
+
+            assert_eq!(parsed.this_update, expected);
+            assert_eq!(parsed.next_update, Some(expected + Duration::days(30)));
+            assert_eq!(parsed.revoked()[0].revocation_date(), &expected);
+        }
+
+        #[test]
+        fn utctime_year_55_reads_as_1955_not_2055() {
+            // RFC 5280 §4.1.2.5.1 pins UTCTime's century: 00-49 is 2000-2049,
+            // 50-99 is 1950-1999. chrono's `%y` pivots at 68 instead and would
+            // read this as 2055. We never *write* such a value — a conforming
+            // writer uses GeneralizedTime from 2050 — but a third-party CRL can
+            // carry one.
+            let der = crl_with_hand_built_utctime("550601120000Z");
+            let parsed = X509CrlBuilder::from_der(&der, dummy_certificate()).unwrap();
+
+            assert_eq!(parsed.this_update.year(), 1955);
+        }
+
+        /// Take a real CRL and rewrite its `thisUpdate` as a UTCTime carrying
+        /// `value`, leaving the DER otherwise intact.
+        ///
+        /// The signature no longer matches, which does not matter: `from_der`
+        /// parses without verifying, and parsing is what is under test.
+        fn crl_with_hand_built_utctime(value: &str) -> Vec<u8> {
+            let der = crl_in_year(2026);
+            let needle = [
+                &[test_der::TAG_UTCTIME, 13][..],
+                b"260601120000Z", // thisUpdate, as written by crl_in_year(2026)
+            ]
+            .concat();
+            let at = der
+                .windows(needle.len())
+                .position(|w| w == needle.as_slice())
+                .expect("thisUpdate not found in CRL DER");
+
+            let mut out = der.clone();
+            out[at + 2..at + 2 + 13].copy_from_slice(value.as_bytes());
+            out
+        }
     }
 
     #[test]

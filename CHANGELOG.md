@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] - 2026-08-10
+
+One fix, in two places, plus the reader half of the same rule. Nothing breaks.
+
+### Fixed
+- **Validity dates were encoded as `GeneralizedTime` regardless of year.** RFC 5280
+  §4.1.2.5.1 requires `UTCTime` for dates through 2049 and `GeneralizedTime` for
+  2050 and later; §5.1.2.4–5.1.2.6 impose the same rule on a CRL's `thisUpdate`,
+  `nextUpdate` and each entry's `revocationDate`. Every certificate built with an
+  explicit `valid_from`/`valid_to`, and every CRL this crate has produced, used
+  `GeneralizedTime` throughout.
+
+  OpenSSL accepts that, which is why it went unnoticed for nine releases — the
+  crate's own tests, `verify_cert` and `openssl x509 -text` are all satisfied.
+  Stricter verifiers are not: LibreSSL rejects the certificate outright with
+  `format error in certificate's notBefore field`, so a certificate that verified
+  in one toolchain failed in another for reasons nothing in the API surface hinted
+  at. It also could not be seen in a log or an assertion, because `Asn1Time`'s
+  `Display` renders both encodings identically — only the DER tag byte differs.
+
+  Both encoders now follow the year boundary. The certificate path delegates to
+  OpenSSL's `ASN1_TIME_set`, which implements the rule; the CRL path, which writes
+  DER directly and has no `ASN1_TIME` to defer to, chooses the tag and the year
+  width together.
+- **The CRL parser read `UTCTime` with the wrong century for years 50–68.** RFC 5280
+  fixes `UTCTime`'s two-digit year at 00–49 → 2000–2049 and 50–99 → 1950–1999.
+  The parser used chrono's `%y`, which pivots at 68 instead, so a `thisUpdate` of
+  `55…` was read as 2055 rather than 1955. Latent until now, since the writer never
+  emitted `UTCTime`; reachable for CRLs from other implementations.
+
+New certificates and CRLs are conforming from this release. **Artefacts already on
+disk keep their old encoding** — a CA or leaf issued by an earlier version must be
+reissued before a strict verifier will accept it.
+
 ## [0.5.1] - 2026-08-03
 
 Two regressions from the SubjectAltName rework in 0.5.0. Both are fixes; nothing
