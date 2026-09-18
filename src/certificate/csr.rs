@@ -646,8 +646,7 @@ mod tests {
                 &interca2,
                 CsrOptions::new().pathlen(0, vec![ca, interca1]).is_ca(true),
             )
-            .err()
-            .expect("");
+            .expect_err("");
         assert!(
             err.to_string()
                 .contains("signer's path length budget is exhausted; cannot issue a CA"),
@@ -671,8 +670,7 @@ mod tests {
                 &ca,
                 CsrOptions::new().is_ca(true).pathlen(1, vec![]), // budget=1, m=1 → 1>=1
             )
-            .err()
-            .expect("inflated pathLen must be rejected");
+            .expect_err("inflated pathLen must be rejected");
         assert!(
             err.to_string()
                 .contains("requested pathLen exceeds what the signer's chain permits"),
@@ -703,8 +701,7 @@ mod tests {
                 &inter,
                 CsrOptions::new().is_ca(true).pathlen(0, vec![]), // root omitted
             )
-            .err()
-            .expect("incomplete chain must be rejected");
+            .expect_err("incomplete chain must be rejected");
         assert!(
             err.to_string().contains("Could not find self signed root"),
             "got: {err}"
@@ -758,8 +755,7 @@ mod tests {
 
         let err = tampered
             .build_signed_certificate(&ca, CsrOptions::new())
-            .err()
-            .expect("CSR with broken proof-of-possession must be rejected");
+            .expect_err("CSR with broken proof-of-possession must be rejected");
         assert!(
             err.to_string().contains("proof-of-possession"),
             "expected a proof-of-possession error, got: {err}"
@@ -901,8 +897,7 @@ mod tests {
         };
         let err = csr
             .build_signed_certificate(&ca, CsrOptions::new())
-            .err()
-            .expect("a PQC signature key requesting keyEncipherment must be rejected");
+            .expect_err("a PQC signature key requesting keyEncipherment must be rejected");
         assert!(
             err.to_string().contains("keyEncipherment"),
             "expected a keyEncipherment error, got: {err}"

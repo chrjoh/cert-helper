@@ -897,8 +897,7 @@ mod tests {
             .is_ca(true)
             .pathlen(0)
             .build_and_sign_with_chain(&inter, &[])
-            .err()
-            .expect("incomplete chain (missing root) must be rejected");
+            .expect_err("incomplete chain (missing root) must be rejected");
         assert!(
             err.to_string().contains("Could not find self signed root"),
             "got: {err}"
@@ -993,8 +992,7 @@ mod tests {
             .is_ca(true)
             .pathlen(0)
             .build_and_sign_with_chain(&inter_ca, &[&ca])
-            .err()
-            .expect("");
+            .expect_err("");
 
         assert!(
             err.to_string()
@@ -1021,8 +1019,7 @@ mod tests {
             .is_ca(true)
             .pathlen(1)
             .build_and_sign_with_chain(&ca, chain.as_slice())
-            .err()
-            .expect("inter CA with pathlen(1) under root pathlen(1) must be rejected");
+            .expect_err("inter CA with pathlen(1) under root pathlen(1) must be rejected");
 
         assert!(
             err.to_string()
@@ -1046,8 +1043,7 @@ mod tests {
         let err = CertBuilder::new()
             .common_name("leaf")
             .build_and_sign(&keyless_ca)
-            .err()
-            .expect("signing with a key-less CA must return an error, not panic");
+            .expect_err("signing with a key-less CA must return an error, not panic");
         assert!(
             err.to_string().contains("private key"),
             "expected a missing-private-key error, got: {err}"
@@ -1174,9 +1170,7 @@ IQ==
 
     #[test]
     fn load_cert_missing_file_errors() {
-        let err = Certificate::load_cert("/no/such/file/here.pem")
-            .err()
-            .expect("msg");
+        let err = Certificate::load_cert("/no/such/file/here.pem").expect_err("msg");
         assert!(
             err.to_string().contains("No such file or directory"),
             "No such file or directory, got: {err}"

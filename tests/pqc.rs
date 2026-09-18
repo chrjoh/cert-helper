@@ -190,9 +190,7 @@ fn test_pqc_key_with_key_encipherment_is_rejected() {
         .key_usage(HashSet::from_iter([Usage::encipherment]))
         .build_and_self_sign();
 
-    let err = result
-        .err()
-        .expect("PQC key with keyEncipherment must be rejected");
+    let err = result.expect_err("PQC key with keyEncipherment must be rejected");
     assert!(
         err.to_string().contains("keyEncipherment"),
         "error should mention keyEncipherment, got: {err}"
@@ -225,9 +223,7 @@ fn test_mlkem_self_sign_is_rejected() {
         .key_type(KeyType::MlKem768)
         .build_and_self_sign();
 
-    let err = result
-        .err()
-        .expect("ML-KEM must not be allowed to self-sign");
+    let err = result.expect_err("ML-KEM must not be allowed to self-sign");
     assert!(
         err.to_string().contains("ML-KEM"),
         "error should mention ML-KEM, got: {err}"
@@ -311,9 +307,7 @@ fn test_mlkem_cert_with_signature_usage_is_rejected() {
         .key_usage(HashSet::from_iter([Usage::signature]))
         .build_and_sign(&ca);
 
-    let err = result
-        .err()
-        .expect("ML-KEM with non-encipherment usage must be rejected");
+    let err = result.expect_err("ML-KEM with non-encipherment usage must be rejected");
     assert!(
         err.to_string().contains("keyEncipherment"),
         "error should mention keyEncipherment, got: {err}"
