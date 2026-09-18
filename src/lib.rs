@@ -329,7 +329,7 @@
 //! | alternative_names | alternative names this certificate is valid for, see [Subject alternative names](#subject-alternative-names) below | string: dns names or IP literals |
 //! | signature_alg | which algorithm to be used for signature, default is SHA256 | enum: SHA1, SHA256, SHA384, SHA512 |
 //! | valid_from | Start date then the certificate is valid, default is now | string: 2010-01-01 |
-//! | valid_to | End date then the certificate is not valid, default is 1 year | string: 2020-01-01 |
+//! | valid_to | End date then the certificate is not valid, default is 1 year. A signed certificate may not outlive its signer: an explicit date later than the signer's `notAfter` is an error, the default is clamped to it | string: 2020-01-01 |
 //! | usage | Key usage to add to the certificates, see list below for options | list of enums, defined in Key Usage table |
 //! | certificate_policy | optional certificate policies to add | AnyPolicy, DomainValidation, OrganizationValidated, IndividualValidated, ExtendedValidation|
 //! | pathlen | optional CA path length: max intermediate CAs allowed below this cert (only applies when ca is true) | u32: 0, 1, 2 … |

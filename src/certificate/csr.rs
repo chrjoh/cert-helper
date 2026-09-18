@@ -1,5 +1,5 @@
 use super::builder::{BuilderFields, UseesBuilderFields, select_hash};
-use super::common::{X509Common, X509Parts, create_asn1_time_from_date};
+use super::common::{ValidityBound, X509Common, X509Parts, set_validity};
 use super::enforce_path_len;
 #[cfg(feature = "pqc")]
 use super::key::reject_mlkem_signing;
@@ -12,7 +12,7 @@ use super::usage::get_key_usage;
 use super::usage::validate_pqc_key_usage;
 use super::{Certificate, CertificatePolicy, Usage, ca_basic_constraints, can_sign_cert};
 use super::{add_san_entry, san_names};
-use openssl::asn1::{Asn1Object, Asn1OctetString, Asn1Time};
+use openssl::asn1::{Asn1Object, Asn1OctetString};
 use openssl::bn::BigNum;
 use openssl::hash::{MessageDigest, hash};
 use openssl::nid::Nid;
@@ -61,8 +61,8 @@ impl CsrX509Common for Csr {}
 
 /// Holds configuration options for creating a certificate from a Certificate Signing Request (CSR).
 pub struct CsrOptions {
-    valid_to: Asn1Time,
-    valid_from: Asn1Time,
+    valid_to: ValidityBound,
+    valid_from: ValidityBound,
     ca: bool,
     policies: Vec<CertificatePolicy>,
     path_len: Option<u32>,
@@ -82,31 +82,31 @@ impl CsrOptions {
     pub fn new() -> Self {
         Self {
             ca: false,
-            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
-            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
+            valid_from: ValidityBound::DaysFromNow(0), // today, resolved at build
+            valid_to: ValidityBound::DaysFromNow(365), // one year from now
             policies: Default::default(),
             path_len: None,
             chain: Vec::new(),
         }
     }
 
-    /// Sets the start date from which the certificate should be valid.
+    /// Sets the `yyyy-mm-dd` date from which the certificate is valid.
     ///
-    /// # Arguments
-    /// * `valid_from` - A string in the format `yyyy-mm-dd`.
+    /// The date is parsed when the certificate is built, so a malformed value is
+    /// reported as an error from `build_signed_certificate` rather than a panic here.
     pub fn valid_from(mut self, valid_from: &str) -> Self {
-        self.valid_from =
-            create_asn1_time_from_date(valid_from).expect("Failed to parse valid_from date");
+        self.valid_from = ValidityBound::Date(valid_from.to_owned());
         self
     }
 
-    /// Sets the end date after which the certificate should no longer be valid.
+    /// Sets the `yyyy-mm-dd` date after which the certificate is no longer valid.
     ///
-    /// # Arguments
-    /// * `valid_to` - A string in the format `yyyy-mm-dd`.
+    /// The date is parsed when the certificate is built, so a malformed value is
+    /// reported as an error from `build_signed_certificate` rather than a panic
+    /// here. A date later than the signer's `notAfter` is rejected at build time;
+    /// the default one-year window is clamped to the signer's `notAfter` instead.
     pub fn valid_to(mut self, valid_to: &str) -> Self {
-        self.valid_to =
-            create_asn1_time_from_date(valid_to).expect("Failed to parse valid_to date");
+        self.valid_to = ValidityBound::Date(valid_to.to_owned());
         self
     }
 
@@ -324,8 +324,12 @@ impl Csr {
         } else {
             builder.append_extension(BasicConstraints::new().build()?)?;
         }
-        builder.set_not_before(&options.valid_from)?;
-        builder.set_not_after(&options.valid_to)?;
+        set_validity(
+            &mut builder,
+            &options.valid_from,
+            &options.valid_to,
+            Some(&*signer.x509),
+        )?;
         let serial_number = {
             let mut serial = BigNum::new()?;
             serial.rand(159, openssl::bn::MsbOption::MAYBE_ZERO, false)?;

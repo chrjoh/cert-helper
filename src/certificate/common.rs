@@ -1,5 +1,7 @@
 use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
 use openssl::asn1::Asn1Time;
+use openssl::x509::{X509Builder, X509Ref};
+use std::cmp::Ordering;
 use std::fs;
 use std::fs::{OpenOptions, create_dir_all};
 use std::io::Write;
@@ -122,11 +124,97 @@ impl<T: X509Parts> X509Common for T {
 pub(crate) fn create_asn1_time_from_date(
     date_str: &str,
 ) -> Result<Asn1Time, Box<dyn std::error::Error>> {
-    let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")?;
+    // Name the offending input and the expected shape: this error now reaches
+    // callers (CH11), so it has to be actionable without a backtrace.
+    let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .map_err(|e| format!("invalid date {date_str:?}: expected yyyy-mm-dd ({e})"))?;
     let datetime = NaiveDateTime::new(date, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
     Ok(Asn1Time::from_unix(
         Utc.from_utc_datetime(&datetime).timestamp(),
     )?)
+}
+
+/// A validity bound whose parsing is deferred until the certificate is built.
+///
+/// The builder setters take a `yyyy-mm-dd` string. Keeping that string here, and
+/// parsing it only in the build step, lets the setters stay infallible (so the
+/// fluent builder chain is unchanged) while a malformed date is reported as an
+/// `Err` from the build instead of a panic in the setter. Caller input is not a
+/// contract violation, so it must not panic (M-PANIC-ON-BUG).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ValidityBound {
+    /// A number of whole days from the moment the certificate is built.
+    ///
+    /// Used for the builder defaults (today and one year from today).
+    DaysFromNow(u32),
+    /// A caller-supplied `yyyy-mm-dd` date, parsed when the certificate is built.
+    Date(String),
+}
+
+impl ValidityBound {
+    /// Resolves the bound to an [`Asn1Time`] relative to now.
+    ///
+    /// # Errors
+    /// Returns an error if a [`ValidityBound::Date`] is not a valid `yyyy-mm-dd`
+    /// date, or if OpenSSL fails to construct the time.
+    pub(crate) fn resolve(&self) -> Result<Asn1Time, Box<dyn std::error::Error>> {
+        match self {
+            Self::DaysFromNow(days) => Ok(Asn1Time::days_from_now(*days)?),
+            Self::Date(date) => create_asn1_time_from_date(date),
+        }
+    }
+}
+
+/// Writes `notBefore` and `notAfter` to `builder`, keeping `notAfter` within the signer's.
+///
+/// When `signer` is given, a certificate must not outlive it: path validators
+/// reject the chain the moment the issuer expires, so a `notAfter` later than the
+/// signer's is almost always a configuration mistake (CH10). An explicit
+/// [`ValidityBound::Date`] later than the signer's `notAfter` is rejected. The
+/// default [`ValidityBound::DaysFromNow`] window carries no caller intent about
+/// the exact date, so it is clamped to the signer's `notAfter` instead; this also
+/// keeps a CA and a leaf built with defaults in the same run from failing on the
+/// second boundary between their two `days_from_now` calls.
+///
+/// `notBefore` is deliberately not compared against the signer: backdating a leaf
+/// before its issuer is common in test fixtures and validators only check each
+/// certificate's own window against the current time.
+///
+/// # Errors
+/// Returns an error if either bound fails to resolve, if an explicit `valid_to`
+/// is later than the signer's `notAfter`, or if OpenSSL rejects the times.
+pub(crate) fn set_validity(
+    builder: &mut X509Builder,
+    valid_from: &ValidityBound,
+    valid_to: &ValidityBound,
+    signer: Option<&X509Ref>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let not_before = valid_from.resolve()?;
+    let not_after = valid_to.resolve()?;
+    builder.set_not_before(&not_before)?;
+
+    if let Some(signer) = signer {
+        let signer_not_after = signer.not_after();
+        if not_after.compare(signer_not_after)? == Ordering::Greater {
+            match valid_to {
+                ValidityBound::Date(date) => {
+                    return Err(format!(
+                        "certificate notAfter {date} is later than the signer's notAfter \
+                         {signer_not_after} (signer {:?}); a certificate must not outlive \
+                         its issuer",
+                        signer.subject_name()
+                    )
+                    .into());
+                }
+                ValidityBound::DaysFromNow(_) => {
+                    builder.set_not_after(signer_not_after)?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+    builder.set_not_after(&not_after)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -250,6 +338,230 @@ mod asn1_time_encoding {
         assert_eq!(not_before.tag, TAG_UTCTIME, "notBefore: {not_before:?}");
         assert_eq!(not_after.tag, TAG_UTCTIME, "notAfter: {not_after:?}");
         assert_eq!(not_before.value, "260807000000Z");
+    }
+}
+
+#[cfg(test)]
+mod validity_bounds {
+    //! CH10 (a certificate must not outlive its issuer) and CH11 (malformed
+    //! dates are errors, not panics). Both `CertBuilder` and `CsrOptions` are
+    //! separate call sites into `set_validity`, so each gets its own coverage.
+    use crate::certificate::{
+        CertBuilder, Certificate, CsrBuilder, CsrOptions, UseesBuilderFields,
+    };
+    use std::cmp::Ordering;
+
+    /// A CA that stays valid for decades, so these tests are not date-fragile.
+    fn long_lived_ca() -> Certificate {
+        CertBuilder::new()
+            .common_name("validity test ca")
+            .is_ca(true)
+            .valid_to("2049-01-01")
+            .build_and_self_sign()
+            .unwrap()
+    }
+
+    /// A CA expiring well inside the default one-year leaf window.
+    fn ca_expiring_in_days(days: i64) -> Certificate {
+        let valid_to = (chrono::Utc::now() + chrono::Duration::days(days))
+            .format("%Y-%m-%d")
+            .to_string();
+        CertBuilder::new()
+            .common_name("short lived ca")
+            .is_ca(true)
+            .valid_to(&valid_to)
+            .build_and_self_sign()
+            .unwrap()
+    }
+
+    // ------------------------------------------------------------ CH10: CertBuilder
+
+    #[test]
+    fn explicit_not_after_later_than_signer_is_rejected() {
+        let ca = long_lived_ca();
+        let err = CertBuilder::new()
+            .common_name("leaf")
+            .valid_to("2049-06-01")
+            .build_and_sign(&ca)
+            .expect_err("a leaf outliving its issuer must be rejected")
+            .to_string();
+
+        assert!(
+            err.contains("2049-06-01"),
+            "names the offending date: {err}"
+        );
+        assert!(err.contains("notAfter"), "names the field: {err}");
+    }
+
+    #[test]
+    fn explicit_not_after_equal_to_signer_is_accepted() {
+        let ca = long_lived_ca();
+        let leaf = CertBuilder::new()
+            .common_name("leaf")
+            .valid_to("2049-01-01")
+            .build_and_sign(&ca)
+            .unwrap();
+
+        assert_eq!(
+            leaf.x509.not_after().compare(ca.x509.not_after()).unwrap(),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn default_not_after_is_clamped_to_signer() {
+        let ca = ca_expiring_in_days(30);
+        let leaf = CertBuilder::new()
+            .common_name("leaf")
+            .build_and_sign(&ca)
+            .unwrap();
+
+        assert_eq!(
+            leaf.x509.not_after().compare(ca.x509.not_after()).unwrap(),
+            Ordering::Equal,
+            "the default one-year window must be clamped to the CA's notAfter"
+        );
+    }
+
+    #[test]
+    fn default_not_after_is_kept_when_signer_outlives_it() {
+        let ca = long_lived_ca();
+        let leaf = CertBuilder::new()
+            .common_name("leaf")
+            .build_and_sign(&ca)
+            .unwrap();
+
+        assert_eq!(
+            leaf.x509.not_after().compare(ca.x509.not_after()).unwrap(),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn with_chain_path_rejects_a_leaf_outliving_its_issuer() {
+        let ca = long_lived_ca();
+        let result = CertBuilder::new()
+            .common_name("intermediate")
+            .is_ca(true)
+            .pathlen(0)
+            .valid_to("2049-06-01")
+            .build_and_sign_with_chain(&ca, &[]);
+
+        assert!(
+            result.is_err(),
+            "build_and_sign_with_chain shares the check"
+        );
+    }
+
+    #[test]
+    fn self_signed_certificate_is_not_constrained() {
+        // No signer, nothing to outlive: any explicit date is fine.
+        let cert = CertBuilder::new()
+            .common_name("root")
+            .valid_to("2075-06-01")
+            .build_and_self_sign();
+        assert!(cert.is_ok());
+    }
+
+    // ------------------------------------------------------------ CH10: CSR path
+
+    fn csr() -> crate::certificate::Csr {
+        CsrBuilder::new()
+            .common_name("csr subject")
+            .certificate_signing_request()
+            .unwrap()
+    }
+
+    #[test]
+    fn csr_signed_with_explicit_not_after_later_than_signer_is_rejected() {
+        let ca = long_lived_ca();
+        let err = csr()
+            .build_signed_certificate(&ca, CsrOptions::new().valid_to("2049-06-01"))
+            .expect_err("a CSR-issued certificate outliving its issuer must be rejected")
+            .to_string();
+
+        assert!(err.contains("2049-06-01"), "{err}");
+    }
+
+    #[test]
+    fn csr_signed_with_default_not_after_is_clamped_to_signer() {
+        let ca = ca_expiring_in_days(30);
+        let signed = csr()
+            .build_signed_certificate(&ca, CsrOptions::new())
+            .unwrap();
+
+        assert_eq!(
+            signed
+                .x509
+                .not_after()
+                .compare(ca.x509.not_after())
+                .unwrap(),
+            Ordering::Equal
+        );
+    }
+
+    // ------------------------------------------------------------ CH11: no panics
+
+    #[test]
+    fn malformed_valid_from_is_an_error_not_a_panic() {
+        let err = CertBuilder::new()
+            .common_name("bad date")
+            .valid_from("2026-13-01")
+            .build_and_self_sign()
+            .expect_err("a malformed date must be an Err")
+            .to_string();
+
+        assert!(
+            err.contains("2026-13-01"),
+            "names the offending input: {err}"
+        );
+        assert!(
+            err.contains("yyyy-mm-dd"),
+            "names the expected format: {err}"
+        );
+    }
+
+    #[test]
+    fn malformed_valid_to_is_an_error_not_a_panic() {
+        let err = CertBuilder::new()
+            .common_name("bad date")
+            .valid_to("01-01-2026")
+            .build_and_self_sign()
+            .expect_err("a malformed date must be an Err")
+            .to_string();
+
+        assert!(err.contains("01-01-2026"), "{err}");
+    }
+
+    #[test]
+    fn malformed_csr_option_dates_are_errors_not_panics() {
+        let ca = long_lived_ca();
+
+        let from = csr().build_signed_certificate(&ca, CsrOptions::new().valid_from("2026/01/01"));
+        assert!(from.is_err(), "CsrOptions::valid_from must not panic");
+
+        let to = csr().build_signed_certificate(&ca, CsrOptions::new().valid_to("not-a-date"));
+        assert!(to.is_err(), "CsrOptions::valid_to must not panic");
+    }
+
+    #[test]
+    fn well_formed_dates_still_land_on_the_certificate() {
+        // Deferring the parse must not change what a valid date produces.
+        let cert = CertBuilder::new()
+            .common_name("dates")
+            .valid_from("2026-08-07")
+            .valid_to("2026-11-05")
+            .build_and_self_sign()
+            .unwrap();
+
+        assert_eq!(
+            cert.x509.not_before().to_string(),
+            "Aug  7 00:00:00 2026 GMT"
+        );
+        assert_eq!(
+            cert.x509.not_after().to_string(),
+            "Nov  5 00:00:00 2026 GMT"
+        );
     }
 }
 
