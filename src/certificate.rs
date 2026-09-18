@@ -6,7 +6,7 @@ mod policy;
 mod usage;
 use builder::select_hash;
 pub use builder::{BuilderCommon, BuilderFields, HashAlg, UseesBuilderFields};
-use common::create_asn1_time_from_date;
+use common::{ValidityBound, set_validity};
 pub use common::{X509Common, X509Parts};
 pub use csr::{Csr, CsrBuilder, CsrOptions, CsrX509Common};
 pub use key::KeyType;
@@ -128,8 +128,8 @@ impl Certificate {
 /// Builder for creating a new certificate and private key
 pub struct CertBuilder<P = PathLenUnset> {
     fields: BuilderFields,
-    valid_from: Asn1Time,
-    valid_to: Asn1Time,
+    valid_from: ValidityBound,
+    valid_to: ValidityBound,
     policies: Vec<CertificatePolicy>,
     ca: bool,
     path_len: Option<u32>,
@@ -156,22 +156,23 @@ impl<P> CertBuilder<P> {
         self.policies = policies;
         self
     }
-    /// Sets the start date from which the certificate should be valid.
+    /// Sets the `yyyy-mm-dd` date from which the certificate is valid.
     ///
-    /// # Arguments
-    /// * `valid_from` - A string in the format `yyyy-mm-dd`.
+    /// The date is parsed when the certificate is built, so a malformed value is
+    /// reported as an error from the build step rather than a panic here.
     pub fn valid_from(mut self, valid_from: &str) -> Self {
-        self.valid_from =
-            create_asn1_time_from_date(valid_from).expect("Failed to parse valid_from date");
+        self.valid_from = ValidityBound::Date(valid_from.to_owned());
         self
     }
-    /// Sets the end date after which the certificate should no longer be valid.
+    /// Sets the `yyyy-mm-dd` date after which the certificate is no longer valid.
     ///
-    /// # Arguments
-    /// * `valid_to` - A string in the format `yyyy-mm-dd`.
+    /// The date is parsed when the certificate is built, so a malformed value is
+    /// reported as an error from the build step rather than a panic here. When
+    /// the certificate is signed by a CA, a date later than the signer's
+    /// `notAfter` is rejected at build time; the default one-year window is
+    /// clamped to the signer's `notAfter` instead.
     pub fn valid_to(mut self, valid_to: &str) -> Self {
-        self.valid_to =
-            create_asn1_time_from_date(valid_to).expect("Failed to parse valid_to date");
+        self.valid_to = ValidityBound::Date(valid_to.to_owned());
         self
     }
     /// Specifies whether the certificate should be a Certificate Authority (CA).
@@ -203,7 +204,11 @@ impl<P> CertBuilder<P> {
         }
     }
 
-    /// create a self signed x509 certificate and private key
+    /// Creates a self-signed X.509 certificate and its private key.
+    ///
+    /// # Errors
+    /// Returns an error if a `valid_from`/`valid_to` date is not `yyyy-mm-dd`,
+    /// if key generation fails, or if OpenSSL rejects the certificate contents.
     pub fn build_and_self_sign(&self) -> Result<Certificate, Box<dyn std::error::Error>> {
         let (mut builder, pkey) = self.prepare_x509_builder(None)?;
 
@@ -276,8 +281,12 @@ impl<P> CertBuilder<P> {
         builder.set_serial_number(&serial_number)?;
         builder.set_subject_name(&name)?;
         builder.set_pubkey(&pkey)?;
-        builder.set_not_before(&self.valid_from)?;
-        builder.set_not_after(&self.valid_to)?;
+        set_validity(
+            &mut builder,
+            &self.valid_from,
+            &self.valid_to,
+            signer.map(|s| &*s.x509),
+        )?;
         match signer {
             Some(signer) => builder.set_issuer_name(signer.x509.subject_name())?,
             None => builder.set_issuer_name(&name)?,
@@ -376,15 +385,21 @@ impl CertBuilder<PathLenUnset> {
     pub fn new() -> Self {
         Self {
             fields: BuilderFields::default(),
-            valid_from: Asn1Time::days_from_now(0).unwrap(), // today
-            valid_to: Asn1Time::days_from_now(365).unwrap(), // one year from now
+            valid_from: ValidityBound::DaysFromNow(0), // today, resolved at build
+            valid_to: ValidityBound::DaysFromNow(365), // one year from now
             ca: false,
             policies: Default::default(),
             path_len: None,
             _marker: PhantomData,
         }
     }
-    /// Create a signed certificate and private key
+    /// Creates a certificate and private key signed by `signer`.
+    ///
+    /// # Errors
+    /// Returns an error if `signer` is not a valid CA within its validity period
+    /// or has no private key, if a `valid_from`/`valid_to` date is not
+    /// `yyyy-mm-dd`, if an explicit `valid_to` is later than the signer's
+    /// `notAfter`, or if OpenSSL rejects the certificate contents.
     pub fn build_and_sign(
         &self,
         signer: &Certificate,
@@ -421,6 +436,12 @@ impl CertBuilder<PathLenUnset> {
 }
 
 impl CertBuilder<PathLenSet> {
+    /// Creates a CA certificate signed by `signer`, enforcing its path length against `chain`.
+    ///
+    /// # Errors
+    /// Returns an error under the same conditions as [`CertBuilder::build_and_sign`],
+    /// and additionally if the requested path length does not fit under the
+    /// constraints already present in `chain`.
     pub fn build_and_sign_with_chain(
         &self,
         signer: &Certificate,
@@ -876,8 +897,7 @@ mod tests {
             .is_ca(true)
             .pathlen(0)
             .build_and_sign_with_chain(&inter, &[])
-            .err()
-            .expect("incomplete chain (missing root) must be rejected");
+            .expect_err("incomplete chain (missing root) must be rejected");
         assert!(
             err.to_string().contains("Could not find self signed root"),
             "got: {err}"
@@ -972,8 +992,7 @@ mod tests {
             .is_ca(true)
             .pathlen(0)
             .build_and_sign_with_chain(&inter_ca, &[&ca])
-            .err()
-            .expect("");
+            .expect_err("");
 
         assert!(
             err.to_string()
@@ -1000,8 +1019,7 @@ mod tests {
             .is_ca(true)
             .pathlen(1)
             .build_and_sign_with_chain(&ca, chain.as_slice())
-            .err()
-            .expect("inter CA with pathlen(1) under root pathlen(1) must be rejected");
+            .expect_err("inter CA with pathlen(1) under root pathlen(1) must be rejected");
 
         assert!(
             err.to_string()
@@ -1025,8 +1043,7 @@ mod tests {
         let err = CertBuilder::new()
             .common_name("leaf")
             .build_and_sign(&keyless_ca)
-            .err()
-            .expect("signing with a key-less CA must return an error, not panic");
+            .expect_err("signing with a key-less CA must return an error, not panic");
         assert!(
             err.to_string().contains("private key"),
             "expected a missing-private-key error, got: {err}"
@@ -1153,9 +1170,7 @@ IQ==
 
     #[test]
     fn load_cert_missing_file_errors() {
-        let err = Certificate::load_cert("/no/such/file/here.pem")
-            .err()
-            .expect("msg");
+        let err = Certificate::load_cert("/no/such/file/here.pem").expect_err("msg");
         assert!(
             err.to_string().contains("No such file or directory"),
             "No such file or directory, got: {err}"

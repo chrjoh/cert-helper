@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.3] - 2026-09-18
+
+Two fixes to certificate validity handling. No public API changes: the builder
+setters keep their signatures and the `yyyy-mm-dd` input contract; only failure
+timing and emitted `notAfter` values change.
+
+### Fixed
+- **A signed certificate could outlive its issuer.** `build_and_sign`,
+  `build_and_sign_with_chain` and `Csr::build_signed_certificate` checked that the
+  *signer* was inside its validity window but never compared the new
+  certificate's `notAfter` against the signer's. A leaf issued from a CA expiring
+  in ten days, with the default one-year window, verified today and failed in ten
+  days on the expired issuer, with nothing said at issuance. An explicit
+  `valid_to` later than the signer's `notAfter` is now rejected with an error
+  naming both dates. The default one-year window carries no intent about the
+  exact date and is clamped to the signer's `notAfter` instead, which also keeps a
+  CA and leaf built with defaults in the same run from tripping on the second
+  boundary between their two "now" calls. `notBefore` is not compared: backdating
+  a leaf before its issuer is common in fixtures and validators only check each
+  certificate's own window against the current time.
+- **`valid_from` / `valid_to` panicked on a malformed date.** Both `CertBuilder`
+  and `CsrOptions` parsed the string in the setter and unwrapped the result, so a
+  typo such as `2026-13-01` aborted the process with a backtrace instead of an
+  error naming the field. The setters now store the string and the build step
+  parses it, returning an error that quotes the offending input and the expected
+  `yyyy-mm-dd` shape. Valid dates produce the same bytes as before.
+
 ## [0.5.2] - 2026-08-10
 
 One fix, in two places, plus the reader half of the same rule. Nothing breaks.
