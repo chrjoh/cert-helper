@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.5.3] - 2026-09-18
 
 Two fixes to certificate validity handling. No public API changes: the builder
 setters keep their signatures and the `yyyy-mm-dd` input contract; only failure
