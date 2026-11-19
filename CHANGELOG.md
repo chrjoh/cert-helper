@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.4] - 2026-11-19
+
+Dependency refresh via `cargo update`. No code or public API changes, and the
+version requirements in `Cargo.toml` are unchanged, so downstream crates resolve
+dependencies exactly as before; only this crate's `Cargo.lock` (used for its own
+builds and tests) moves.
+
+### Changed
+- **Direct dependencies:** `openssl` 0.10.81 → 0.10.82, `openssl-sys`
+  0.9.117 → 0.9.118.
+- **Transitive dependencies:** `cc` 1.4.0 → 1.11.2, `time` 0.3.54 → 0.3.55,
+  `thiserror` / `thiserror-impl` 2.0.19 → 2.0.21, `libc` 0.2.189 → 0.2.191,
+  `syn` 3.0.3 → 3.0.10, `rustix` 1.1.4 → 1.1.6, `log` 0.4.33 → 0.4.35,
+  `wasm-bindgen` (and macro/shared crates) 0.2.126 → 0.2.130, `js-sys`
+  0.3.103 → 0.3.107, `find-msvc-tools` 0.1.9 → 0.1.15, `futures-core` /
+  `futures-task` / `futures-util` 0.3.33 → 0.3.34, plus patch bumps to
+  `android_system_properties`, `bitflags`, `bumpalo`, `cfg-if`, `data-encoding`,
+  `deranged`, `errno`, `lazy_static`, `num-integer`, `pin-project-lite`,
+  `pkg-config`, `powerfmt` and `unicode-ident`.
+
 ## [0.5.3] - 2026-09-18
 
 Two fixes to certificate validity handling. No public API changes: the builder
